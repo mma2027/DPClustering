@@ -94,9 +94,11 @@ Rscript scripts/generator.R
 │                                                                                                                                                    
 ├── utils/                                                                                                                                           
 │   ├── evaluations.py    # Clustering quality evaluation metrics
+│   ├── ortho_clustering.py # Orthogonal projection clustering assignment
 │   └── utils.py          # General utility functions
 │                                                                                                                                                    
 ├── experiments.py        # Main experiment runner
+├── ortho_cluster_test.py # Standalone test for orthogonal projection clustering
 ├── env.yml               # Conda environment specification
 └── README.md             # Project documentation
 ```
@@ -158,6 +160,31 @@ Key parameters include:
 - `--alpha`: Maximum distance parameter
 - `--post`: Post-processing method for centroids
 - `--results_folder`: Folder to store results
+
+## Orthogonal Projection Clustering
+
+`utils/ortho_clustering.py` implements a fast clustering assignment based on orthogonal projections:
+
+```python
+from utils.ortho_clustering import ortho_assign
+
+labels = ortho_assign(values, d_prime, seed=42)
+```
+
+**How it works:** Given `n` points in `d` dimensions, the function generates `d'` random orthonormal basis vectors via SVD of a random matrix. Each point is projected onto this basis, and cluster membership is determined by the sign pattern of the projections — effectively assigning points to quadrants in the projected space. This produces up to `2^d'` clusters.
+
+- `values`: `(n, d)` numpy array of data points
+- `d_prime`: number of orthogonal basis vectors (capped at `d` automatically)
+- `seed`: random seed for reproducibility
+- Returns: `(n,)` integer array of cluster labels in `[0, 2^d' - 1]`
+
+### Running the standalone test
+
+```bash
+python ortho_cluster_test.py
+```
+
+This runs `ortho_assign` across the accuracy datasets for `d' = 1..5` with 10 random seeds each, and saves results to `ortho_results/results.csv` with columns: `dataset`, `n`, `d`, `d_prime`, `seed`, `num_clusters`, `num_occupied`, `elapsed`, `cluster_size_min`, `cluster_size_max`, `cluster_size_std`.
 
 ## Citation
 
