@@ -39,6 +39,30 @@ conda env create -f env.yml
 conda activate fastlloyd
 ```
 
+3. Download and prepare datasets:
+
+```bash
+python scripts/download_data.py
+```
+
+This creates the `data/` directory and populates it with all required datasets. The script fetches:
+
+| Source | Datasets |
+|--------|----------|
+| scikit-learn | `iris`, `wine`, `breast`, `house`, `mnist` |
+| UCI ML Repository | `adult`, `yeast` |
+| Synthetic (generated) | `s1`, `lsun`, `birch2`, `timesynth_*` |
+
+> **Note:** The `s1`, `lsun`, and `birch2` datasets are synthetic approximations of the
+> original SIPU clustering benchmarks. The `mnist` dataset uses sklearn's 8x8 digits
+> (1797 samples) rather than the full 28x28 MNIST. Results may differ from the original paper.
+
+For synthetic scale/ablation datasets, you can additionally run the R generator:
+
+```bash
+Rscript scripts/generator.R
+```
+
 ## Repository Structure
 
 ```
@@ -62,7 +86,8 @@ conda activate fastlloyd
 │   ├── synthetic_bar.py  # Bar charts for synthetic dataset results
 │   └── timing_analysis.py # Analysis of timing experiments
 │                                                                                                                                                    
-├── scripts/                                                                                                                                         
+├── scripts/
+│   ├── download_data.py   # Download and prepare datasets from sklearn/UCI
 │   ├── generator.R        # R script for generating synthetic datasets
 │   ├── experiment_runner.sh # Script for running accuracy and scale experiments
 │   └── timing_runner.sh   # Script for running timing experiments
