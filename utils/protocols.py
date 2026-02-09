@@ -170,3 +170,24 @@ def local_proto(value_lists, params: Params, method="masked"):
         centroid_history.append(centroids)
 
     return to_fixed(centroids), unassigned_last_iter
+
+
+def ortho_proto(value_lists, params: Params, method="masked"):
+    """Protocol adapter for orthogonal projection clustering.
+
+    Concatenates client data (ortho is not federated), runs ortho_assign
+    to partition points by projection sign patterns, and computes centroids.
+
+    Args:
+        value_lists (list): List of numpy arrays (one per client)
+        params (Params): Must have d_prime and seed attributes
+        method (str, optional): Unused, kept for protocol interface compatibility
+
+    Returns:
+        tuple: (centroids, 0) where centroids is (num_occupied, d)
+    """
+    from utils.ortho_clustering import ortho_assign, cluster_centers
+    values = np.vstack(value_lists)
+    labels = ortho_assign(values, params.d_prime, seed=params.seed)
+    centers, _ = cluster_centers(values, labels)
+    return centers, 0

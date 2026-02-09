@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from data_io.data_handler import load_txt, normalize
-from utils.ortho_clustering import ortho_assign
+from utils.ortho_clustering import ortho_assign, random_orthogonal_basis
 
 # Datasets to test (same as FastLloyd accuracy experiments)
 DATASETS = ["iris", "s1", "house", "adult", "lsun", "birch2", "wine", "yeast", "breast", "mnist"]
@@ -79,14 +79,8 @@ def run_tests():
 
 
 def get_basis(d, d_prime, seed=42):
-    """Replicates the basis computation from ortho_assign so we can build
-    test points with known projections."""
-    d_eff = min(d_prime, d)
-    rng = np.random.RandomState(seed)
-    R = rng.randn(d, d_eff)
-    Q, _, _ = np.linalg.svd(R, full_matrices=False)
-    Q = Q / np.linalg.norm(Q, axis=0)
-    return Q  # (d, d_eff), orthonormal columns, Q^T @ Q = I
+    """Convenience wrapper for tests — delegates to the shared implementation."""
+    return random_orthogonal_basis(d, d_prime, seed=seed)
 
 
 def run_verification_tests():

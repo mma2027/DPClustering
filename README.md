@@ -94,7 +94,8 @@ Rscript scripts/generator.R
 │                                                                                                                                                    
 ├── utils/                                                                                                                                           
 │   ├── evaluations.py    # Clustering quality evaluation metrics
-│   ├── ortho_clustering.py # Orthogonal projection clustering assignment
+│   ├── ortho_clustering.py # Orthogonal projection clustering (basis generation, assignment, centroids)
+│   ├── protocols.py      # Clustering protocols (local, MPI, ortho)
 │   └── utils.py          # General utility functions
 │                                                                                                                                                    
 ├── experiments.py        # Main experiment runner
@@ -155,28 +156,47 @@ python experiments.py --exp_type "test" --datasets "mnist" "adult" --method "dia
 Key parameters include:
 
 - `--exp_type`: Type of experiment to run (accuracy, scale, timing, test)
+- `--protocol`: Clustering protocol to use (`local` for FastLloyd, `ortho` for orthogonal projection)
 - `--datasets`: Datasets to use for the experiment
 - `--method`: Maximum distance method to use
 - `--alpha`: Maximum distance parameter
 - `--post`: Post-processing method for centroids
+- `--d_primes`: d' values to sweep when using `--protocol ortho` (default: 1 2 3 4 5)
 - `--results_folder`: Folder to store results
 
 ## Orthogonal Projection Clustering
 
-`utils/ortho_clustering.py` implements a fast clustering assignment based on orthogonal projections:
+`utils/ortho_clustering.py` implements a fast clustering method based on orthogonal projections.
+
+**How it works:** Given `n` points in `d` dimensions, the algorithm generates `d'` random orthonormal basis vectors (via SVD by default), projects each point onto this basis, and assigns cluster membership by the sign pattern of the projections. This partitions the space into up to `2^d'` quadrants.
+
+### API
 
 ```python
-from utils.ortho_clustering import ortho_assign
-
-labels = ortho_assign(values, d_prime, seed=42)
+from utils.ortho_clustering import orthogonalize_svd, random_orthogonal_basis, ortho_assign, cluster_centers
 ```
 
-**How it works:** Given `n` points in `d` dimensions, the function generates `d'` random orthonormal basis vectors via SVD of a random matrix. Each point is projected onto this basis, and cluster membership is determined by the sign pattern of the projections — effectively assigning points to quadrants in the projected space. This produces up to `2^d'` clusters.
+- `orthogonalize_svd(R)` — orthogonalize a matrix via economy SVD. Swappable with any `(R) -> Q` function (e.g. QR decomposition).
+- `random_orthogonal_basis(d, d_prime, seed, orthogonalize=None)` — generate a random orthonormal basis. Pass a custom `orthogonalize` callable to change the decomposition method.
+- `ortho_assign(values, d_prime, seed, basis=None)` — assign points to clusters. Accepts an optional pre-computed `basis` matrix instead of generating one.
+- `cluster_centers(values, labels)` — compute the centroid of each cluster. Returns `(centers, unique_labels)`.
 
-- `values`: `(n, d)` numpy array of data points
-- `d_prime`: number of orthogonal basis vectors (capped at `d` automatically)
-- `seed`: random seed for reproducibility
-- Returns: `(n,)` integer array of cluster labels in `[0, 2^d' - 1]`
+### Running with the experiment framework
+
+The ortho algorithm is integrated as a protocol, so it can be run with any experiment type:
+
+```bash
+# Accuracy experiments
+python experiments.py --exp_type accuracy --protocol ortho
+
+# Scale experiments
+python experiments.py --exp_type scale --protocol ortho
+
+# Custom d' sweep and datasets
+python experiments.py --exp_type accuracy --protocol ortho --d_primes 2 3 4 --datasets iris mnist
+```
+
+When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
 
 ### Running the standalone test
 
@@ -184,7 +204,7 @@ labels = ortho_assign(values, d_prime, seed=42)
 python ortho_cluster_test.py
 ```
 
-This runs `ortho_assign` across the accuracy datasets for `d' = 1..5` with 10 random seeds each, and saves results to `ortho_results/results.csv` with columns: `dataset`, `n`, `d`, `d_prime`, `seed`, `num_clusters`, `num_occupied`, `elapsed`, `cluster_size_min`, `cluster_size_max`, `cluster_size_std`.
+This runs verification tests followed by benchmarks across the accuracy datasets for `d' = 1..5` with 10 random seeds each, saving results to `ortho_results/results.csv`.
 
 ## Citation
 

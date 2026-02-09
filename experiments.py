@@ -100,8 +100,12 @@ class ExperimentRunner:
         # Handle scaling
         values_unscaled = unscale(self.values.copy()) if params.fixed else self.values
         centroids_final = unscale(centroids) if params.fixed else centroids
-        # Evaluate results
-        metrics = evaluate(centroids_final, values_unscaled, self.centroids_gt, self.eval_metrics)
+        # Evaluate results (skip MSE when centroid counts differ)
+        eval_metrics = self.eval_metrics
+        if centroids_final.shape[0] != self.centroids_gt.shape[0] and eval_metrics == "all":
+            eval_metrics = ["nicv", "bcss", "empty_clusters", "silhouette",
+                            "davies_bouldin", "calinski_harabasz", "dunn_index"]
+        metrics = evaluate(centroids_final, values_unscaled, self.centroids_gt, eval_metrics)
         metrics["elapsed"] = elapsed_time
         metrics["unassigned"] = unassigned
 
@@ -131,29 +135,34 @@ class ExperimentRunner:
         params_order = ["methods", "posts", "delays", "dps"]
         dimension, data_size = self.values.shape[1], self.values.shape[0]
 
+        d_primes = self.params_list.get("d_primes", [None])
+
         for method, post, delay, dp in itertools.product(
                 *[self.params_list[key] for key in params_order]
         ):
             for eps_budget in self._get_eps_budgets(dp):
-                params = Params(
-                    num_clients=self.params_list["num_clients"],
-                    k=self.k,
-                    dim=dimension,
-                    data_size=data_size,
-                    dp=dp,
-                    eps=eps_budget,
-                    method=method,
-                    post=post,
-                    delay=delay,
-                )
+                for d_prime in d_primes:
+                    params = Params(
+                        num_clients=self.params_list["num_clients"],
+                        k=self.k,
+                        dim=dimension,
+                        data_size=data_size,
+                        dp=dp,
+                        eps=eps_budget,
+                        method=method,
+                        post=post,
+                        delay=delay,
+                    )
+                    if d_prime is not None:
+                        params.d_prime = d_prime
 
-                if method == "none":
-                    params.alpha = 0
-                    yield params
-                else:
-                    for alpha in self.params_list["alphas"]:
-                        params.alpha = alpha
+                    if method == "none":
+                        params.alpha = 0
                         yield params
+                    else:
+                        for alpha in self.params_list["alphas"]:
+                            params.alpha = alpha
+                            yield params
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
@@ -204,6 +213,7 @@ class ExperimentRunner:
 
         # Prepare results dictionary
         result = {
+            "protocol": self.protocol.__name__,
             **{attr: getattr(params, attr) for attr in vars(params)},
             "successes": successful_experiments,
             "experiments": experiment_count,
@@ -281,6 +291,19 @@ def parse_args() -> Namespace:
         default="submission",
         help="folder for results"
     )
+    parser.add_argument(
+        "--protocol",
+        default="local",
+        choices=["local", "ortho"],
+        help="clustering protocol to use"
+    )
+    parser.add_argument(
+        "--d_primes",
+        nargs="+",
+        type=int,
+        default=None,
+        help="d_prime values to sweep (ortho protocol only)"
+    )
     return parser.parse_args()
 
 
@@ -346,6 +369,22 @@ def main() -> None:
         num_clients = comm.world_size - 1
         params_list["num_clients"] = num_clients
         exp_type = f"timing_{num_clients}"
+    elif args.protocol == "ortho":
+        from utils.protocols import ortho_proto
+        proto = ortho_proto
+        with_comm = False
+        params_list["num_clients"] = 2
+        # Ortho doesn't use DP/method/post — collapse to single "none" values
+        params_list.update({
+            "dps": ["none"],
+            "methods": ["none"],
+            "eps_budgets": [0],
+            "posts": ["none"],
+        })
+        if args.d_primes is not None:
+            params_list["d_primes"] = args.d_primes
+        else:
+            params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
     else:
         from utils.protocols import local_proto
         proto = local_proto
