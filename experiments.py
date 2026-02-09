@@ -16,6 +16,7 @@ from timeit import default_timer as timer
 from typing import List, Dict, Any, Generator
 
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -174,8 +175,16 @@ class ExperimentRunner:
         total_metrics = defaultdict(list)
         successful_experiments = experiment_count = 0
 
+        # Show current config
+        is_ortho = self.protocol.__name__ == "ortho_proto"
+        if is_ortho:
+            config_desc = f"d_prime={params.d_prime}, clusters=2^{params.d_prime}={2**params.d_prime}"
+        else:
+            config_desc = f"dp={params.dp}, method={params.method}, eps={params.eps}, iters={params.iters}"
+        print(f"\n[{self.dataset}] {self.protocol.__name__} | {config_desc} | k={params.k}")
+
         # Run multiple times with different seeds
-        for seed in self.params_list["seeds"]:
+        for seed in tqdm(self.params_list["seeds"], desc="  seeds", leave=False):
             params.seed = seed
             try:
                 metrics = self.run_single_protocol(params)
