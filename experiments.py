@@ -192,7 +192,10 @@ class ExperimentRunner:
                 for metric, value in metrics.items():
                     total_metrics[metric].append(value)
 
-                failed = any(np.isnan(value) for value in metrics.values())
+                failed = any(
+                    isinstance(value, float) and np.isnan(value)
+                    for value in metrics.values()
+                )
                 successful_experiments += 1 if not failed else 0
                 experiment_count += 1
 
@@ -271,7 +274,7 @@ class ExperimentRunner:
 
         # Save failed experiments
         with open(folder / "failed.json", "w") as f:
-            json.dump(self.failed_experiments, f)
+            json.dump(self.failed_experiments, f, default=str)
 
     def run(self) -> None:
         """Run all experiments with different parameter combinations."""
@@ -410,7 +413,7 @@ def main() -> None:
         params_list["num_clients"] = 2
 
     # Run experiments in parallel
-    max_processes = min(os.cpu_count()-16 or 1, len(params_list["datasets"]))
+    max_processes = min(max(os.cpu_count() - 16, 1), len(params_list["datasets"]))
     if "timing" in exp_type:
         max_processes = 1
     if max_processes > 1:
