@@ -80,8 +80,9 @@ Rscript scripts/generator.R
 │   └── server.py         # Server implementation with DP mechanisms
 │                                                                                                                                                    
 ├── plots/                                                                                                                                           
-│   ├── ablation_plots.py # Visualization for ablation studies
-│   ├── per_dataset.py    # Dataset-specific result visualization
+│   ├── ablation_plots.py      # Visualization for ablation studies
+│   ├── compare_protocols.py   # Compare ortho vs original algorithm results
+│   ├── per_dataset.py         # Dataset-specific result visualization
 │   ├── scale_heatmap.py  # Heatmap generation for scalability results
 │   ├── synthetic_bar.py  # Bar charts for synthetic dataset results
 │   └── timing_analysis.py # Analysis of timing experiments
@@ -140,6 +141,7 @@ bash scripts/timing_runner.sh      # For timing experiments with varying numbers
 The repository includes several visualization tools in the `plots` directory:
 
 - `per_dataset.py`: Creates performance visualizations for individual datasets
+- `compare_protocols.py`: Compares ortho vs original algorithm results (bar charts + summary CSV)
 - `scale_heatmap.py`: Generates heatmaps to analyze scalability
 - `synthetic_bar.py`: Creates bar plots comparing performance on synthetic datasets
 - `ablation_plots.py`: Creates plots for ablation studies
@@ -205,6 +207,36 @@ python ortho_cluster_test.py
 ```
 
 This runs verification tests followed by benchmarks across the accuracy datasets for `d' = 1..5` with 10 random seeds each, saving results to `ortho_results/results.csv`.
+
+### Comparing protocols
+
+After running both local and ortho experiments, compare results with:
+
+```bash
+# Compare accuracy results (default)
+python -m plots.compare_protocols
+
+# Custom results folder
+python -m plots.compare_protocols my_results
+
+# Compare other experiment types (e.g., scale)
+python -m plots.compare_protocols submission --exp_type scale
+```
+
+This generates:
+- **Per-dataset bar charts** (`compare_NICV.pdf`, `compare_Silhouette.pdf`, etc.) in each dataset folder, showing side-by-side metric values with confidence intervals for Lloyd, FastLloyd (best epsilon), and Ortho (each d' value).
+- **Summary CSV** (`submission/accuracy/comparison_summary.csv`) with one row per (dataset, method) and all metric columns, for easy analysis in pandas or a spreadsheet.
+
+### Results file layout
+
+```
+submission/accuracy/<dataset>/
+├── variances.csv              # Local protocol (Lloyd, FastLloyd, etc.)
+├── variances_ortho.csv        # Ortho protocol results
+├── compare_NICV.pdf           # Bar chart comparing NICV
+├── compare_Silhouette.pdf     # Bar chart comparing Silhouette Score
+└── ...                        # One chart per metric
+```
 
 ## Citation
 
