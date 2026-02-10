@@ -197,9 +197,9 @@ class ExperimentRunner:
                 experiment_count += 1
 
             except Exception as e:
-                print(f"Experiment failed: {str(e)}")
+                print(f"\nExperiment failed (seed {seed}): {str(e)}")
                 self.failed_experiments.append(vars(params))
-                self._save_results()
+                continue
 
         # Process and save results
         self._process_and_save_results(
