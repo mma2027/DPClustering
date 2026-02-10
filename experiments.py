@@ -347,7 +347,12 @@ def process_dataset(
         proto, k, dataset, values, params_list,
         exp_type, results_folder, plot, with_comm
     )
-    experiment.run()
+    try:
+        experiment.run()
+    except Exception as e:
+        import traceback
+        print(f"\n[{dataset}] FATAL ERROR: {e}")
+        traceback.print_exc()
 
 
 def main() -> None:
