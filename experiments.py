@@ -257,8 +257,12 @@ class ExperimentRunner:
         if self.results_df is not None:
             self.results_df = self.results_df.sort_values("Normalized Intra-cluster Variance (NICV)")
 
-            # Determine filename based on communication setting
-            filename = "variances.csv"
+            # Determine filename based on protocol
+            proto_name = self.protocol.__name__
+            if proto_name != "local_proto":
+                filename = f"variances_{proto_name.replace('_proto', '')}.csv"
+            else:
+                filename = "variances.csv"
             if self.with_comm:
                 rank_str = f"_{self.comm.rank}" if self.comm.world_size > 1 else ""
                 filename = f"variances{rank_str}.csv"
