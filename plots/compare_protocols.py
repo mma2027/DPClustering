@@ -55,6 +55,7 @@ COLORS = {
     "GLloyd": "orange",
     "FastLloyd": "green",
     "Ortho": "royalblue",
+    "Ortho-DP": "mediumpurple",
 }
 
 
@@ -111,11 +112,15 @@ def load_local_rows(df):
 
 
 def load_ortho_rows(df):
-    """Extract rows from ortho protocol results (one per d_prime)."""
+    """Extract rows from ortho protocol results (one per d_prime × sigma)."""
     rows = []
     for _, r in df.iterrows():
         d_prime = int(r.get("d_prime", 0))
-        label = f"Ortho (d'={d_prime})"
+        sigma = r.get("sigma", 0.0)
+        if sigma > 0:
+            label = f"Ortho-DP (d'={d_prime}, σ={sigma})"
+        else:
+            label = f"Ortho (d'={d_prime})"
         row = {"label": label}
         for metric in METRICS_DICT:
             if metric in r.index:

@@ -137,35 +137,36 @@ class ExperimentRunner:
         dimension, data_size = self.values.shape[1], self.values.shape[0]
 
         d_primes = self.params_list.get("d_primes", [None])
+        sigmas = self.params_list.get("sigmas", [0.0])
 
         for method, post, delay, dp in itertools.product(
                 *[self.params_list[key] for key in params_order]
         ):
             for eps_budget in self._get_eps_budgets(dp):
                 for d_prime in d_primes:
-                    params = Params(
-                        num_clients=self.params_list["num_clients"],
-                        k=self.k,
-                        dim=dimension,
-                        data_size=data_size,
-                        dp=dp,
-                        eps=eps_budget,
-                        method=method,
-                        post=post,
-                        delay=delay,
-                    )
-                    if d_prime is not None:
-                        params.d_prime = d_prime
-                    if "sigma" in self.params_list:
-                        params.sigma = self.params_list["sigma"]
+                    for sigma in sigmas:
+                        params = Params(
+                            num_clients=self.params_list["num_clients"],
+                            k=self.k,
+                            dim=dimension,
+                            data_size=data_size,
+                            dp=dp,
+                            eps=eps_budget,
+                            method=method,
+                            post=post,
+                            delay=delay,
+                        )
+                        if d_prime is not None:
+                            params.d_prime = d_prime
+                        params.sigma = sigma
 
-                    if method == "none":
-                        params.alpha = 0
-                        yield params
-                    else:
-                        for alpha in self.params_list["alphas"]:
-                            params.alpha = alpha
+                        if method == "none":
+                            params.alpha = 0
                             yield params
+                        else:
+                            for alpha in self.params_list["alphas"]:
+                                params.alpha = alpha
+                                yield params
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
@@ -324,9 +325,10 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--sigma",
-        default=0.0,
+        nargs="*",
         type=float,
-        help="Gaussian noise std dev for ortho DP (0 = no noise)"
+        default=None,
+        help="Gaussian noise std dev(s) for ortho DP (omit for default sweep)"
     )
     return parser.parse_args()
 
@@ -414,7 +416,10 @@ def main() -> None:
             params_list["d_primes"] = args.d_primes
         else:
             params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
-        params_list["sigma"] = args.sigma
+        if args.sigma is not None:
+            params_list["sigmas"] = args.sigma if args.sigma else [0.0]
+        else:
+            params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
     else:
         from utils.protocols import local_proto
         proto = local_proto
