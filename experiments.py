@@ -156,6 +156,8 @@ class ExperimentRunner:
                     )
                     if d_prime is not None:
                         params.d_prime = d_prime
+                    if "sigma" in self.params_list:
+                        params.sigma = self.params_list["sigma"]
 
                     if method == "none":
                         params.alpha = 0
@@ -320,6 +322,12 @@ def parse_args() -> Namespace:
         default=None,
         help="d_prime values to sweep (ortho protocol only)"
     )
+    parser.add_argument(
+        "--sigma",
+        default=0.0,
+        type=float,
+        help="Gaussian noise std dev for ortho DP (0 = no noise)"
+    )
     return parser.parse_args()
 
 
@@ -406,6 +414,7 @@ def main() -> None:
             params_list["d_primes"] = args.d_primes
         else:
             params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
+        params_list["sigma"] = args.sigma
     else:
         from utils.protocols import local_proto
         proto = local_proto

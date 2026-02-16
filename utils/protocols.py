@@ -186,8 +186,11 @@ def ortho_proto(value_lists, params: Params, method="masked"):
     Returns:
         tuple: (centroids, 0) where centroids is (num_occupied, d)
     """
-    from utils.ortho_clustering import ortho_assign, cluster_centers
+    from utils.ortho_clustering import ortho_assign, cluster_centers, noisy_cluster_centers
     values = np.vstack(value_lists)
     labels = ortho_assign(values, params.d_prime, seed=params.seed)
-    centers, _ = cluster_centers(values, labels)
+    if params.sigma > 0:
+        centers, _ = noisy_cluster_centers(values, labels, params.sigma, seed=params.seed)
+    else:
+        centers, _ = cluster_centers(values, labels)
     return centers, 0

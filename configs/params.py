@@ -55,6 +55,7 @@ class Params:
     post: str = "none"
     fixed: bool = True
     d_prime: int = 3
+    sigma: float = 0.0
 
     DEFAULT_BOUNDS = (-1, 1)
     MAX_RETRIES = 100

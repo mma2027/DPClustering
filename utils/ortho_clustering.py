@@ -78,6 +78,36 @@ def ortho_assign(values, d_prime, seed=42, basis=None):
     return labels
 
 
+def noisy_cluster_centers(values, labels, sigma, seed=42):
+    """
+    Compute cluster centroids with Gaussian noise added to sums.
+
+    Adds isotropic Gaussian noise N(0, sigma^2 I) to each cluster's
+    sum vector before dividing by count, following the DP mechanism
+    from "Improved Private DP Clustering via Projections".
+
+    Args:
+        values: (n, d) array of data points
+        labels: (n,) integer cluster labels
+        sigma: standard deviation of Gaussian noise added to each cluster sum
+        seed: random seed for noise generation
+
+    Returns:
+        (k, d) array of noisy cluster centroids
+        unique_labels: (k,) sorted array of the label ids
+    """
+    unique_labels = np.unique(labels)
+    d = values.shape[1]
+    rng = np.random.RandomState(seed)
+    centers = np.empty((len(unique_labels), d))
+    for i, lab in enumerate(unique_labels):
+        cluster_points = values[labels == lab]
+        cluster_sum = cluster_points.sum(axis=0)
+        noise = rng.normal(0, sigma, size=d)
+        centers[i] = (cluster_sum + noise) / cluster_points.shape[0]
+    return centers, unique_labels
+
+
 def cluster_centers(values, labels):
     """
     Compute the centroid of each cluster.
