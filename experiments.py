@@ -108,7 +108,10 @@ class ExperimentRunner:
                             "davies_bouldin", "calinski_harabasz", "dunn_index"]
         metrics = evaluate(centroids_final, values_unscaled, self.centroids_gt, eval_metrics)
         metrics["elapsed"] = elapsed_time
-        metrics["unassigned"] = unassigned
+        if isinstance(unassigned, dict):
+            metrics.update(unassigned)
+        else:
+            metrics["unassigned"] = unassigned
 
         # Generate plots if requested
         if self.plot:
@@ -289,7 +292,7 @@ def parse_args() -> Namespace:
     """Parse command line arguments."""
     parser = ArgumentParser(description="Run experiments for multiparty DP clustering")
     parser.add_argument("--exp_type", default="test", help="type of experiment")
-    parser.add_argument("--datasets", nargs="+", default=["mnist"], help="datasets to run")
+    parser.add_argument("--datasets", nargs="+", default=accuracy_datasets, help="datasets to run")  # changed default from ["mnist"] to accuracy_datasets
     parser.add_argument("--plot", action="store_true", help="plot clusters")
     parser.add_argument("--num_runs", default=100, type=int, help="number of runs")
     parser.add_argument(
@@ -390,6 +393,7 @@ def main() -> None:
     # Override parameters if needed
     if exp_type in exp_parameter_dict:
         params_list.update(exp_parameter_dict[exp_type])
+        params_list["datasets"] = args.datasets  # re-apply --datasets after update, since exp_parameter_dict entries override it
 
     # Set up protocol and communication
     if "timing" in exp_type:

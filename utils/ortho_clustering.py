@@ -108,6 +108,22 @@ def noisy_cluster_centers(values, labels, sigma, seed=42):
     return centers, unique_labels
 
 
+def cluster_counts(labels):
+    """
+    Compute the number of points in each cluster.
+
+    Args:
+        labels: (n,) integer cluster labels
+
+    Returns:
+        counts: (k,) array of point counts per cluster
+        unique_labels: (k,) sorted array of the label ids
+    """
+    unique_labels = np.unique(labels)
+    counts = np.array([np.sum(labels == lab) for lab in unique_labels])
+    return counts, unique_labels
+
+
 def cluster_centers(values, labels):
     """
     Compute the centroid of each cluster.
