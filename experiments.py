@@ -423,7 +423,7 @@ def main() -> None:
         if args.sigma is not None:
             params_list["sigmas"] = args.sigma if args.sigma else [0.0]
         else:
-            params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
+            params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0, 1000.0]
     else:
         from utils.protocols import local_proto
         proto = local_proto
