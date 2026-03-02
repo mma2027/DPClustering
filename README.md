@@ -88,10 +88,15 @@ Rscript scripts/generator.R
 │   └── timing_analysis.py # Analysis of timing experiments
 │                                                                                                                                                    
 ├── scripts/
-│   ├── download_data.py   # Download and prepare datasets from sklearn/UCI
-│   ├── generator.R        # R script for generating synthetic datasets
-│   ├── experiment_runner.sh # Script for running accuracy and scale experiments
-│   └── timing_runner.sh   # Script for running timing experiments
+│   ├── download_data.py                  # Download and prepare datasets from sklearn/UCI
+│   ├── generator.R                       # R script for generating synthetic datasets
+│   ├── setup.sh                          # Extract data archives and create conda environment
+│   ├── run_accuracy_scale_experiments.sh # Run accuracy and scale experiments in parallel
+│   ├── run_timing_experiments.sh         # Run timing experiments with 2/4/8 clients
+│   ├── run_experiments.sh                # Orchestrates accuracy, scale, and timing runs
+│   ├── generate_plots.sh                 # Generate all plots and analysis from results
+│   ├── no_setup.sh                       # Run experiments + plots (environment already active)
+│   └── end_to_end.sh                     # Full pipeline: setup → experiments → plots
 │                                                                                                                                                    
 ├── utils/                                                                                                                                           
 │   ├── evaluations.py    # Clustering quality evaluation metrics
@@ -132,8 +137,11 @@ mpirun -np 3 python experiments.py --exp_type "timing"
 You can also use the provided scripts to run multiple experiment types:
 
 ```bash
-bash scripts/experiment_runner.sh  # For accuracy and scale experiments
-bash scripts/timing_runner.sh      # For timing experiments with varying numbers of clients
+bash scripts/run_accuracy_scale_experiments.sh  # Accuracy and scale experiments in parallel
+bash scripts/run_timing_experiments.sh          # Timing experiments with 2, 4, and 8 clients
+bash scripts/run_experiments.sh                 # All of the above
+bash scripts/generate_plots.sh                  # Generate all plots from results
+bash scripts/end_to_end.sh                      # Full pipeline from scratch (setup + experiments + plots)
 ```
 
 ### Visualization
@@ -164,6 +172,7 @@ Key parameters include:
 - `--alpha`: Maximum distance parameter
 - `--post`: Post-processing method for centroids
 - `--d_primes`: d' values to sweep when using `--protocol ortho` (default: 1 2 3 4 5)
+- `--sigma`: Gaussian noise std dev(s) for ortho DP centroids (default sweeps 0.0, 0.1, 0.5, 1.0, 5.0, 1000.0)
 - `--results_folder`: Folder to store results
 
 ## Orthogonal Projection Clustering
@@ -175,13 +184,14 @@ Key parameters include:
 ### API
 
 ```python
-from utils.ortho_clustering import orthogonalize_svd, random_orthogonal_basis, ortho_assign, cluster_centers
+from utils.ortho_clustering import orthogonalize_svd, random_orthogonal_basis, ortho_assign, cluster_centers, noisy_cluster_centers
 ```
 
 - `orthogonalize_svd(R)` — orthogonalize a matrix via economy SVD. Swappable with any `(R) -> Q` function (e.g. QR decomposition).
 - `random_orthogonal_basis(d, d_prime, seed, orthogonalize=None)` — generate a random orthonormal basis. Pass a custom `orthogonalize` callable to change the decomposition method.
 - `ortho_assign(values, d_prime, seed, basis=None)` — assign points to clusters. Accepts an optional pre-computed `basis` matrix instead of generating one.
 - `cluster_centers(values, labels)` — compute the centroid of each cluster. Returns `(centers, unique_labels)`.
+- `noisy_cluster_centers(values, labels, sigma, seed)` — compute centroids with Gaussian noise `N(0, sigma²)` added to each cluster sum before dividing by count (DP mechanism for sum queries).
 
 ### Running with the experiment framework
 
@@ -196,9 +206,12 @@ python experiments.py --exp_type scale --protocol ortho
 
 # Custom d' sweep and datasets
 python experiments.py --exp_type accuracy --protocol ortho --d_primes 2 3 4 --datasets iris mnist
+
+# Custom sigma sweep (noise added to cluster sums for DP centroids)
+python experiments.py --exp_type accuracy --protocol ortho --sigma 0.0 1.0 10.0
 ```
 
-When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
+When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). `sigma` controls Gaussian noise added to cluster sums before computing centroids; passing `--sigma` with no values defaults to `0.0`. Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
 
 ### Running the standalone test
 

@@ -2,7 +2,7 @@ import numpy as np
 from tqdm import tqdm
 
 from parties import MaskedClient, UnmaskedClient, Server
-from data_io import to_fixed
+from data_io import to_fixed, unscale
 from configs import Params
 from utils import set_seed
 
@@ -188,6 +188,8 @@ def ortho_proto(value_lists, params: Params, method="masked"):
     """
     from utils.ortho_clustering import ortho_assign, cluster_centers, noisy_cluster_centers, cluster_counts
     values = np.vstack(value_lists)
+    if params.fixed:
+        values = unscale(values)
     labels = ortho_assign(values, params.d_prime, seed=params.seed)
 
     counts, _ = cluster_counts(labels)
@@ -200,6 +202,9 @@ def ortho_proto(value_lists, params: Params, method="masked"):
         centers, _ = noisy_cluster_centers(values, labels, params.sigma, seed=params.seed)
     else:
         centers, _ = cluster_centers(values, labels)
+
+    if params.fixed:
+        centers = to_fixed(centers)
 
     return centers, {
         "unassigned": 0,
