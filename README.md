@@ -172,7 +172,7 @@ Key parameters include:
 - `--alpha`: Maximum distance parameter
 - `--post`: Post-processing method for centroids
 - `--d_primes`: d' values to sweep when using `--protocol ortho` (default: 1 2 3 4 5)
-- `--sigma`: Gaussian noise std dev(s) for ortho DP centroids (default sweeps 0.0, 0.1, 0.5, 1.0, 5.0, 1000.0)
+- `--sigma`: Gaussian noise std dev(s) for ortho DP centroids (default sweeps 0.0, 0.1, 0.5, 1.0, 5.0)
 - `--results_folder`: Folder to store results
 
 ## Orthogonal Projection Clustering
