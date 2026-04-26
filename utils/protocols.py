@@ -186,11 +186,19 @@ def ortho_proto(value_lists, params: Params, method="masked"):
     Returns:
         tuple: (centroids, 0) where centroids is (num_occupied, d)
     """
-    from utils.ortho_clustering import ortho_assign, cluster_centers, noisy_cluster_centers, cluster_counts
+    from utils.ortho_clustering import orthogonal_basis, ortho_assign, cluster_centers, noisy_cluster_centers, cluster_counts
     values = np.vstack(value_lists)
     if params.fixed:
         values = unscale(values)
-    labels = ortho_assign(values, params.d_prime, seed=params.seed)
+    basis = orthogonal_basis(
+        values, params.d_prime,
+        method=params.basis_method,
+        seed=params.seed,
+        epsilon=params.basis_epsilon,
+        delta=params.basis_delta,
+        clip_norm=params.basis_clip_norm,
+    )
+    labels = ortho_assign(values, params.d_prime, seed=params.seed, basis=basis)
 
     counts, _ = cluster_counts(labels)
     print(f"  Quadrant counts (d'={params.d_prime}, sigma={params.sigma}): "

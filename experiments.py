@@ -141,6 +141,10 @@ class ExperimentRunner:
 
         d_primes = self.params_list.get("d_primes", [None])
         sigmas = self.params_list.get("sigmas", [0.0])
+        basis_methods = self.params_list.get("basis_methods", ["random"])
+        basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
+        basis_deltas = self.params_list.get("basis_deltas", [1e-5])
+        basis_clip_norms = self.params_list.get("basis_clip_norms", [1.0])
 
         for method, post, delay, dp in itertools.product(
                 *[self.params_list[key] for key in params_order]
@@ -148,28 +152,35 @@ class ExperimentRunner:
             for eps_budget in self._get_eps_budgets(dp):
                 for d_prime in d_primes:
                     for sigma in sigmas:
-                        params = Params(
-                            num_clients=self.params_list["num_clients"],
-                            k=self.k,
-                            dim=dimension,
-                            data_size=data_size,
-                            dp=dp,
-                            eps=eps_budget,
-                            method=method,
-                            post=post,
-                            delay=delay,
-                        )
-                        if d_prime is not None:
-                            params.d_prime = d_prime
-                        params.sigma = sigma
+                        for basis_method, basis_epsilon, basis_delta, basis_clip_norm in itertools.product(
+                                basis_methods, basis_epsilons, basis_deltas, basis_clip_norms
+                        ):
+                            params = Params(
+                                num_clients=self.params_list["num_clients"],
+                                k=self.k,
+                                dim=dimension,
+                                data_size=data_size,
+                                dp=dp,
+                                eps=eps_budget,
+                                method=method,
+                                post=post,
+                                delay=delay,
+                            )
+                            if d_prime is not None:
+                                params.d_prime = d_prime
+                            params.sigma = sigma
+                            params.basis_method = basis_method
+                            params.basis_epsilon = basis_epsilon
+                            params.basis_delta = basis_delta
+                            params.basis_clip_norm = basis_clip_norm
 
-                        if method == "none":
-                            params.alpha = 0
-                            yield params
-                        else:
-                            for alpha in self.params_list["alphas"]:
-                                params.alpha = alpha
+                            if method == "none":
+                                params.alpha = 0
                                 yield params
+                            else:
+                                for alpha in self.params_list["alphas"]:
+                                    params.alpha = alpha
+                                    yield params
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
@@ -333,6 +344,37 @@ def parse_args() -> Namespace:
         default=None,
         help="Gaussian noise std dev(s) for ortho DP (omit for default sweep)"
     )
+    parser.add_argument(
+        "--basis_method",
+        default="dpsgd_pca",
+        choices=["random", "dpsgd_pca"],
+        help="basis generation method for ortho protocol"
+    )
+    parser.add_argument(
+        "--d_prime",
+        default=None,
+        type=int,
+        nargs="+",
+        help="d_prime value(s) for dpsgd_pca mode (default: 1 2 3 4 5); ignored when --basis_method random"
+    )
+    parser.add_argument(
+        "--basis_epsilon",
+        default=0.5,
+        type=float,
+        help="privacy budget epsilon for the DP-SGD PCA basis step"
+    )
+    parser.add_argument(
+        "--basis_delta",
+        default=1e-5,
+        type=float,
+        help="privacy delta for the DP-SGD PCA basis step"
+    )
+    parser.add_argument(
+        "--basis_clip_norm",
+        default=1.0,
+        type=float,
+        help="per-sample gradient clipping norm for DP-SGD PCA basis"
+    )
     return parser.parse_args()
 
 
@@ -416,7 +458,12 @@ def main() -> None:
             "eps_budgets": [0],
             "posts": ["none"],
         })
-        if args.d_primes is not None:
+        if args.basis_method == "dpsgd_pca":
+            if args.d_prime is not None:
+                params_list["d_primes"] = [max(1, min(5, d)) for d in args.d_prime]
+            else:
+                params_list["d_primes"] = [1, 2, 3, 4, 5]
+        elif args.d_primes is not None:
             params_list["d_primes"] = args.d_primes
         else:
             params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
@@ -424,6 +471,10 @@ def main() -> None:
             params_list["sigmas"] = args.sigma if args.sigma else [0.0]
         else:
             params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
+        params_list["basis_methods"] = [args.basis_method]
+        params_list["basis_epsilons"] = [args.basis_epsilon]
+        params_list["basis_deltas"] = [args.basis_delta]
+        params_list["basis_clip_norms"] = [args.basis_clip_norm]
     else:
         from utils.protocols import local_proto
         proto = local_proto

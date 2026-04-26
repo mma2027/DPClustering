@@ -56,6 +56,10 @@ class Params:
     fixed: bool = True
     d_prime: int = 3
     sigma: float = 0.0
+    basis_method: str = "dpsgd_pca"
+    basis_epsilon: float = 0.5
+    basis_delta: float = 1e-5
+    basis_clip_norm: float = 1.0
 
     DEFAULT_BOUNDS = (-1, 1)
     MAX_RETRIES = 100

@@ -179,17 +179,36 @@ Key parameters include:
 
 `utils/ortho_clustering.py` implements a fast clustering method based on orthogonal projections.
 
-**How it works:** Given `n` points in `d` dimensions, the algorithm generates `d'` random orthonormal basis vectors (via SVD by default), projects each point onto this basis, and assigns cluster membership by the sign pattern of the projections. This partitions the space into up to `2^d'` quadrants.
+**How it works:** Given `n` points in `d` dimensions, the algorithm projects each point onto `d'` orthonormal basis vectors and assigns cluster membership by the sign pattern of the projections, partitioning the space into up to `2^d'` quadrants.
+
+**Basis generation (default: DP-SGD PCA):** By default the basis is computed via DP-SGD, which learns the top-`d'` principal components of the data while providing `(basis_epsilon, basis_delta)`-differential privacy for the basis itself. A random orthonormal basis can be selected instead with `--basis_method random`.
+
+### DP-SGD PCA Basis
+
+The DP-SGD basis algorithm (`dpsgd_pca_basis`) works as follows:
+
+1. Center the data and initialize `W` as a random `(d, d')` orthonormal matrix.
+2. Run SGD on the variance-maximization objective `-trace((XW)^T(XW))` with per-sample gradient clipping (Frobenius norm ≤ `clip_norm`) and calibrated Gaussian noise.
+3. Re-orthonormalize `W` via QR after every mini-batch update to keep `W` on the Stiefel manifold.
+4. Noise calibration uses Rényi DP accounting (via `autodp`) for the subsampled Gaussian mechanism composed over all SGD steps, guaranteeing `(basis_epsilon, basis_delta)`-DP for the returned basis.
+
+**Privacy budget split:** `basis_epsilon` / `basis_delta` are spent only on the basis computation. The clustering step's privacy budget (`--eps`) is separate and independent.
+
+**Recommended defaults:**
+- `basis_epsilon = 0.5` — moderate privacy budget for the basis
+- `basis_delta = 1e-5` — a standard choice; for tighter guarantees use `1 / (n * log(n))` where `n` is the dataset size
+- `basis_clip_norm = 1.0` — appropriate when data is normalized to `[-1, 1]`
 
 ### API
 
 ```python
-from utils.ortho_clustering import orthogonalize_svd, random_orthogonal_basis, ortho_assign, cluster_centers, noisy_cluster_centers
+from utils.ortho_clustering import orthogonal_basis, orthogonalize_svd, random_orthogonal_basis, ortho_assign, cluster_centers, noisy_cluster_centers
 ```
 
-- `orthogonalize_svd(R)` — orthogonalize a matrix via economy SVD. Swappable with any `(R) -> Q` function (e.g. QR decomposition).
-- `random_orthogonal_basis(d, d_prime, seed, orthogonalize=None)` — generate a random orthonormal basis. Pass a custom `orthogonalize` callable to change the decomposition method.
-- `ortho_assign(values, d_prime, seed, basis=None)` — assign points to clusters. Accepts an optional pre-computed `basis` matrix instead of generating one.
+- `orthogonal_basis(X, d_prime, method="dpsgd_pca", seed=42, **kwargs)` — dispatcher: returns a `(d, d')` orthonormal basis via DP-SGD PCA (default) or random SVD. For `dpsgd_pca`, pass `epsilon`, `delta`, `clip_norm` as keyword arguments.
+- `orthogonalize_svd(R)` — orthogonalize a matrix via economy SVD.
+- `random_orthogonal_basis(d, d_prime, seed, orthogonalize=None)` — generate a random orthonormal basis.
+- `ortho_assign(values, d_prime, seed, basis=None)` — assign points to clusters. Accepts an optional pre-computed `basis` matrix.
 - `cluster_centers(values, labels)` — compute the centroid of each cluster. Returns `(centers, unique_labels)`.
 - `noisy_cluster_centers(values, labels, sigma, seed)` — compute centroids with Gaussian noise `N(0, sigma²)` added to each cluster sum before dividing by count (DP mechanism for sum queries).
 
@@ -198,7 +217,7 @@ from utils.ortho_clustering import orthogonalize_svd, random_orthogonal_basis, o
 The ortho algorithm is integrated as a protocol, so it can be run with any experiment type:
 
 ```bash
-# Accuracy experiments
+# Accuracy experiments (DP-SGD PCA basis, default settings)
 python experiments.py --exp_type accuracy --protocol ortho
 
 # Scale experiments
@@ -209,9 +228,28 @@ python experiments.py --exp_type accuracy --protocol ortho --d_primes 2 3 4 --da
 
 # Custom sigma sweep (noise added to cluster sums for DP centroids)
 python experiments.py --exp_type accuracy --protocol ortho --sigma 0.0 1.0 10.0
+
+# Random basis (no DP for basis computation)
+python experiments.py --exp_type accuracy --protocol ortho --basis_method random --d_primes 1 2 3
+
+# DP-SGD PCA basis with custom privacy budget
+python experiments.py --exp_type accuracy --protocol ortho \
+    --basis_method dpsgd_pca --d_prime 3 \
+    --basis_epsilon 0.5 --basis_delta 1e-5 --basis_clip_norm 1.0 \
+    --datasets iris mnist --num_runs 5
 ```
 
 When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). `sigma` controls Gaussian noise added to cluster sums before computing centroids; passing `--sigma` with no values defaults to `0.0`. Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
+
+**Basis parameters (ortho protocol only):**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--basis_method` | `dpsgd_pca` | Basis generation: `dpsgd_pca` (differentially private PCA via SGD) or `random` (random orthonormal, no DP cost) |
+| `--d_prime` | `1 2 3 4 5` | d' value(s) for `dpsgd_pca` mode (space-separated sweep) |
+| `--basis_epsilon` | `0.5` | Privacy budget ε for the DP-SGD basis step |
+| `--basis_delta` | `1e-5` | Privacy δ for the DP-SGD basis step (standard: `1/(n·log(n))`) |
+| `--basis_clip_norm` | `1.0` | Per-sample gradient clipping threshold (Frobenius norm) |
 
 ### Running the standalone test
 

@@ -1,6 +1,144 @@
 import numpy as np
 
 
+def _find_sigma_autodp(epsilon, delta, n, batch_size, epochs):
+    """Binary-search for the Gaussian noise multiplier that achieves (epsilon, delta)-DP.
+
+    Uses Rényi DP accounting (autodp) for the subsampled Gaussian mechanism composed
+    over T = epochs * floor(n / batch_size) steps with sampling rate q = batch_size / n.
+
+    Args:
+        epsilon: target privacy budget
+        delta: target delta
+        n: dataset size
+        batch_size: mini-batch size
+        epochs: number of SGD epochs
+
+    Returns:
+        float: smallest sigma s.t. the total privacy cost ≤ (epsilon, delta)
+    """
+    from autodp import rdp_bank
+
+    T = epochs * max(1, n // batch_size)
+    q = min(1.0, batch_size / n)
+    alphas = list(range(2, 256))
+
+    def dp_cost(sigma):
+        min_eps = float("inf")
+        for alpha in alphas:
+            try:
+                rdp = T * rdp_bank.RDP_gaussian_subsampled({"prob": q, "sigma": sigma}, alpha)
+            except Exception:
+                rdp = T * q * rdp_bank.RDP_gaussian({"sigma": sigma}, alpha)
+            eps = rdp + np.log(1.0 / delta) / (alpha - 1)
+            if eps < min_eps:
+                min_eps = eps
+        return min_eps
+
+    lo, hi = 0.01, 1000.0
+    for _ in range(64):
+        mid = (lo + hi) / 2.0
+        if dp_cost(mid) > epsilon:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
+def dpsgd_pca_basis(X, d_prime, epsilon, delta, clip_norm, epochs=10, lr=0.01, batch_size=256):
+    """Compute a differentially private PCA basis via DP-SGD.
+
+    Runs stochastic gradient descent on the variance-maximization objective
+    -trace((XW)^T (XW)) with per-sample gradient clipping and calibrated
+    Gaussian noise, then re-orthonormalizes W via QR after each step.
+
+    Privacy accounting is done via the Rényi DP moments accountant (autodp),
+    giving tight (epsilon, delta)-DP guarantees for the subsampled Gaussian
+    mechanism composed over all SGD steps.
+
+    Args:
+        X: (n, d) data matrix
+        d_prime: number of private principal components to return
+        epsilon: privacy budget for this computation
+        delta: privacy delta for this computation
+        clip_norm: per-sample gradient clipping threshold (Frobenius norm)
+        epochs: number of passes over the data (default: 10)
+        lr: SGD learning rate (default: 0.01)
+        batch_size: mini-batch size (default: 256)
+
+    Returns:
+        (d, d_eff) orthonormal matrix of private principal components,
+        where d_eff = min(d_prime, d)
+    """
+    n, d = X.shape
+    d_eff = min(d_prime, d)
+
+    # Center the data
+    X_c = X - X.mean(axis=0)
+
+    # Initialize W as a random orthonormal matrix
+    W = random_orthogonal_basis(d, d_eff)
+
+    # Find noise multiplier via moments accountant
+    sigma = _find_sigma_autodp(epsilon, delta, n, batch_size, epochs)
+
+    rng = np.random.RandomState(None)
+    for _ in range(epochs):
+        indices = rng.permutation(n)
+        for start in range(0, n, batch_size):
+            batch = X_c[indices[start: start + batch_size]]
+            b = len(batch)
+            if b == 0:
+                continue
+
+            # Accumulate per-sample clipped gradients
+            agg_grad = np.zeros_like(W)
+            for xi in batch:
+                proj = xi @ W                          # (d_eff,)
+                g_i = -2.0 * np.outer(xi, proj)        # (d, d_eff)
+                g_norm = np.linalg.norm(g_i)
+                g_i *= min(1.0, clip_norm / (g_norm + 1e-8))
+                agg_grad += g_i
+
+            # Add calibrated Gaussian noise (sensitivity = clip_norm)
+            noise = rng.normal(0.0, sigma * clip_norm, size=W.shape)
+            noisy_grad = (agg_grad + noise) / b
+
+            # Gradient descent step
+            W = W - lr * noisy_grad
+
+            # Re-orthonormalize so sign-based assignment stays meaningful
+            W, _ = np.linalg.qr(W)
+
+    return W[:, :d_eff]
+
+
+def orthogonal_basis(X, d_prime, method="random", seed=42, **kwargs):
+    """Dispatcher for orthonormal basis generation.
+
+    Args:
+        X: (n, d) data matrix (used for dpsgd_pca; only shape used for random)
+        d_prime: desired number of basis vectors
+        method: "random" (default) or "dpsgd_pca"
+        seed: random seed (used for random; ignored for dpsgd_pca)
+        **kwargs: for dpsgd_pca — epsilon, delta, clip_norm required
+
+    Returns:
+        (d, d_eff) orthonormal matrix, d_eff = min(d_prime, d)
+    """
+    if method == "random":
+        return random_orthogonal_basis(X.shape[1], d_prime, seed=seed)
+    elif method == "dpsgd_pca":
+        return dpsgd_pca_basis(
+            X, d_prime,
+            epsilon=kwargs["epsilon"],
+            delta=kwargs["delta"],
+            clip_norm=kwargs["clip_norm"],
+        )
+    else:
+        raise ValueError(f"Unknown basis method: {method!r}. Choose 'random' or 'dpsgd_pca'.")
+
+
 def orthogonalize_svd(R):
     """
     Orthogonalize a matrix via economy SVD.
