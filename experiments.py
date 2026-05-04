@@ -145,6 +145,7 @@ class ExperimentRunner:
         basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
         basis_deltas = self.params_list.get("basis_deltas", [1e-5])
         basis_clip_norms = self.params_list.get("basis_clip_norms", [1.0])
+        basis_data_fractions = self.params_list.get("basis_data_fractions", [0.1])
 
         for method, post, delay, dp in itertools.product(
                 *[self.params_list[key] for key in params_order]
@@ -152,8 +153,8 @@ class ExperimentRunner:
             for eps_budget in self._get_eps_budgets(dp):
                 for d_prime in d_primes:
                     for sigma in sigmas:
-                        for basis_method, basis_epsilon, basis_delta, basis_clip_norm in itertools.product(
-                                basis_methods, basis_epsilons, basis_deltas, basis_clip_norms
+                        for basis_method, basis_epsilon, basis_delta, basis_clip_norm, basis_data_fraction in itertools.product(
+                                basis_methods, basis_epsilons, basis_deltas, basis_clip_norms, basis_data_fractions
                         ):
                             params = Params(
                                 num_clients=self.params_list["num_clients"],
@@ -173,6 +174,7 @@ class ExperimentRunner:
                             params.basis_epsilon = basis_epsilon
                             params.basis_delta = basis_delta
                             params.basis_clip_norm = basis_clip_norm
+                            params.basis_data_fraction = basis_data_fraction
 
                             if method == "none":
                                 params.alpha = 0
@@ -347,7 +349,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--basis_method",
         default="dpsgd_pca",
-        choices=["random", "dpsgd_pca"],
+        choices=["random", "dpsgd_pca", "svd_pca"],
         help="basis generation method for ortho protocol"
     )
     parser.add_argument(
@@ -374,6 +376,12 @@ def parse_args() -> Namespace:
         default=1.0,
         type=float,
         help="per-sample gradient clipping norm for DP-SGD PCA basis"
+    )
+    parser.add_argument(
+        "--basis_data_fraction",
+        default=0.1,
+        type=float,
+        help="fraction of data to subsample before running DP-SGD PCA (default: 0.1)"
     )
     return parser.parse_args()
 
@@ -475,6 +483,7 @@ def main() -> None:
         params_list["basis_epsilons"] = [args.basis_epsilon]
         params_list["basis_deltas"] = [args.basis_delta]
         params_list["basis_clip_norms"] = [args.basis_clip_norm]
+        params_list["basis_data_fractions"] = [args.basis_data_fraction]
     else:
         from utils.protocols import local_proto
         proto = local_proto

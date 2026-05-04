@@ -197,6 +197,7 @@ def ortho_proto(value_lists, params: Params, method="masked"):
         epsilon=params.basis_epsilon,
         delta=params.basis_delta,
         clip_norm=params.basis_clip_norm,
+        data_fraction=params.basis_data_fraction,
     )
     labels = ortho_assign(values, params.d_prime, seed=params.seed, basis=basis)
 

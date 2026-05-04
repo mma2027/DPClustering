@@ -60,6 +60,7 @@ class Params:
     basis_epsilon: float = 0.5
     basis_delta: float = 1e-5
     basis_clip_norm: float = 1.0
+    basis_data_fraction: float = 0.1
 
     DEFAULT_BOUNDS = (-1, 1)
     MAX_RETRIES = 100
