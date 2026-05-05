@@ -24,22 +24,26 @@ echo " Results folder : $RESULTS_FOLDER"
 echo " Started        : $(date)"
 echo "========================================"
 
+DATASETS="iris s1 house lsun wine yeast breast mnist"
+
 # ── 1. Run Lloyd/FastLloyd (local protocol) ───────────────────────────────────
 echo ""
 echo "=== Running Lloyd / FastLloyd (local protocol) ==="
 python3 experiments.py \
     --exp_type accuracy \
     --protocol local \
+    --datasets $DATASETS \
     --results_folder "$RESULTS_FOLDER" &
 LOCAL_PID=$!
 
-# ── 2. Run ortho DP-SGD PCA ───────────────────────────────────────────────────
+# ── 2. Run ortho (random, SVD PCA, DP-SGD PCA) ───────────────────────────────
 echo ""
-echo "=== Running ortho DP-SGD PCA ==="
+echo "=== Running ortho (random + svd_pca + dpsgd_pca) ==="
 python3 experiments.py \
     --exp_type accuracy \
     --protocol ortho \
-    --basis_method dpsgd_pca \
+    --basis_method random svd_pca dpsgd_pca \
+    --datasets $DATASETS \
     --results_folder "$RESULTS_FOLDER" &
 ORTHO_PID=$!
 

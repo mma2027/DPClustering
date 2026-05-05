@@ -348,9 +348,10 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--basis_method",
-        default="dpsgd_pca",
+        default=["dpsgd_pca"],
+        nargs="+",
         choices=["random", "dpsgd_pca", "svd_pca"],
-        help="basis generation method for ortho protocol"
+        help="basis generation method(s) for ortho protocol (space-separated, e.g. random svd_pca dpsgd_pca)"
     )
     parser.add_argument(
         "--d_prime",
@@ -466,7 +467,7 @@ def main() -> None:
             "eps_budgets": [0],
             "posts": ["none"],
         })
-        if args.basis_method == "dpsgd_pca":
+        if "dpsgd_pca" in args.basis_method:
             if args.d_prime is not None:
                 params_list["d_primes"] = [max(1, min(5, d)) for d in args.d_prime]
             else:
@@ -479,7 +480,7 @@ def main() -> None:
             params_list["sigmas"] = args.sigma if args.sigma else [0.0]
         else:
             params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
-        params_list["basis_methods"] = [args.basis_method]
+        params_list["basis_methods"] = args.basis_method
         params_list["basis_epsilons"] = [args.basis_epsilon]
         params_list["basis_deltas"] = [args.basis_delta]
         params_list["basis_clip_norms"] = [args.basis_clip_norm]
