@@ -85,7 +85,7 @@ def _load_local_baselines(csv_path):
 def _best_dpsgd_row(group):
     """From a group of dpsgd_pca rows for a fixed d', pick the one with lowest NICV."""
     nicv = "Normalized Intra-cluster Variance (NICV)"
-    if nicv in group.columns:
+    if nicv in group.columns and group[nicv].notna().any():
         return group.loc[group[nicv].idxmin()]
     return group.iloc[0]
 
