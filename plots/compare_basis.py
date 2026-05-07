@@ -137,10 +137,12 @@ def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, sigma_filt
             errs.append(row.get(f"{metric}_h", 0))
 
         offset = (i - (n_per_group - 1) / 2) * bar_width
+        errs_arr = np.array(errs, dtype=float)
+        yerr = errs_arr if np.any(np.isfinite(errs_arr) & (errs_arr > 0)) else None
         ax.bar(
             group_positions + offset,
             vals, bar_width,
-            yerr=errs,
+            yerr=yerr,
             label=BASIS_DISPLAY.get(basis, basis),
             color=BASIS_COLORS.get(basis, "gray"),
             capsize=3, edgecolor="white", alpha=0.9,
