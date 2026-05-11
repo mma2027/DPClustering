@@ -56,8 +56,10 @@ COLORS = {
     "SuLloyd": "red",
     "GLloyd": "orange",
     "FastLloyd": "green",
-    "Ortho-DP": "mediumpurple",  # check Ortho-DP before Ortho so prefix match is correct
-    "Ortho": "royalblue",
+    "Ortho-DP-SGD": "mediumpurple",
+    "Ortho-SVD": "seagreen",
+    "Ortho-Rand": "steelblue",
+    "Ortho": "royalblue",  # fallback for unlabelled ortho rows
 }
 
 
@@ -113,9 +115,13 @@ def load_ortho_rows(df):
     for _, r in df.iterrows():
         d_prime = int(r.get("d_prime", 0))
         sigma = float(r.get("sigma", 0.0))
-        # Label shows sigma only — d' is the row header in the plot
-        label = f"Ortho-DP (σ={sigma})" if sigma > 0 else "Ortho (σ=0)"
-        row = {"label": label, "sigma": sigma, "d_prime": d_prime}
+        basis = r.get("basis_method", "")
+        basis_short = {"random": "Rand", "svd_pca": "SVD", "dpsgd_pca": "DP-SGD"}.get(basis, basis)
+        if sigma > 0:
+            label = f"Ortho-{basis_short} (σ={sigma})"
+        else:
+            label = f"Ortho-{basis_short}"
+        row = {"label": label, "sigma": sigma, "d_prime": d_prime, "basis_method": basis}
         for metric in METRICS_DICT:
             if metric in r.index:
                 row[metric] = r[metric]
