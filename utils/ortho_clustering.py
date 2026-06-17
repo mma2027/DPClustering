@@ -355,6 +355,7 @@ def ortho_assign(values, d_prime, seed=42, basis=None):
     return labels
 
 
+# This is not private, since the cluster_points isn't private
 def noisy_cluster_centers(values, labels, sigma, seed=42):
     """
     Compute cluster centroids with Gaussian noise added to sums.
@@ -506,3 +507,50 @@ def compute_dp_sigmas(epsilon, delta, sigma_fraction):
     sigma_centers = gauss_const / eps_centers  # = sigma_count / sigma_fraction
 
     return sigma_centers, sigma_count
+
+
+def noisy_cluster_centers_and_counts(values, labels, sigma_centers, sigma_count, seed=42):
+    """DP per-orthant centroids and counts from a single noise source.
+ 
+    For each orthant releases the noisy sum and the noisy count, then forms the
+    centroid as  noisy_sum / noisy_count. The centroid is therefore pure
+    post-processing of two Gaussian-mechanism releases and never divides by the
+    true count, so it does not leak the exact count. Both noises are drawn from
+    ONE RandomState (sum first, then count) so they are independent -- unlike
+    calling separately-seeded noisy_cluster_centers / noisy_cluster_counts with
+    the same seed, which correlates the two noise vectors and leaves a
+    no-noise direction in [sum, count] space.
+ 
+    Privacy: with sigma_centers calibrated to (eps_centers, delta/2) for the sum
+    query (L2 sensitivity 1 on unit-norm data) and sigma_count to
+    (eps_count, delta/2) for the count query (sensitivity 1), the pair composes
+    to (eps_centers + eps_count, delta) by sequential composition.
+ 
+    Args:
+        values: (n, d) data points (unit-norm assumed for the sensitivity above)
+        labels: (n,) integer orthant ids from a basis fixed before this call
+        sigma_centers: noise std for the cluster sums (centroid numerator)
+        sigma_count: noise std for the cluster counts (centroid denominator)
+        seed: RNG seed
+ 
+    Returns:
+        centers: (k, d) noisy centroids (noisy_sum / noisy_count)
+        noisy_counts: (k,) noisy counts (float; may be non-integer or <= 0)
+        unique_labels: (k,) sorted orthant ids present in labels
+    """
+    unique_labels = np.unique(labels)
+    d = values.shape[1]
+    rng = np.random.RandomState(seed)
+ 
+    centers = np.empty((len(unique_labels), d))
+    noisy_counts = np.empty(len(unique_labels))
+    for i, lab in enumerate(unique_labels):
+        pts = values[labels == lab]
+        noisy_sum = pts.sum(axis=0) + rng.normal(0.0, sigma_centers, size=d)
+        noisy_count = pts.shape[0] + rng.normal(0.0, sigma_count)
+ 
+        noisy_counts[i] = noisy_count
+        denom = noisy_count if noisy_count >= 1.0 else 1.0  # guard tiny/<=0 counts
+        centers[i] = noisy_sum / denom
+ 
+    return centers, noisy_counts, unique_labels
