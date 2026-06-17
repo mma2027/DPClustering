@@ -172,24 +172,52 @@ def local_proto(value_lists, params: Params, method="masked"):
     return to_fixed(centroids), unassigned_last_iter
 
 
+
 def ortho_proto(value_lists, params: Params, method="masked"):
     """Protocol adapter for orthogonal projection clustering.
-
+ 
     Concatenates client data (ortho is not federated), runs ortho_assign
     to partition points by projection sign patterns, and computes centroids.
-
+ 
+    When params.epsilon > 0, calls compute_dp_sigmas to derive per-mechanism
+    noise levels from the total (epsilon, delta, sigma_fraction) DP budget,
+    then applies both noisy_cluster_centers and noisy_cluster_counts.
+    When params.epsilon == 0, falls back to exact (non-private) computation.
+ 
+    DP budget split (via compute_dp_sigmas):
+        epsilon_centers = sigma_fraction * epsilon_count
+        epsilon_centers + epsilon_count = epsilon
+        delta is split equally: delta/2 per mechanism
+ 
     Args:
         value_lists (list): List of numpy arrays (one per client)
-        params (Params): Must have d_prime and seed attributes
+        params (Params): Must have d_prime and seed attributes. When epsilon > 0,
+            also requires delta and sigma_fraction to calibrate the Gaussian
+            noise for both cluster centers and cluster counts.
         method (str, optional): Unused, kept for protocol interface compatibility
-
+ 
     Returns:
-        tuple: (centroids, 0) where centroids is (num_occupied, d)
+        tuple: (centroids, stats) where centroids is a (num_occupied, d) array
+            and stats is a dict containing:
+                - unassigned (int): always 0
+                - sigma_centers (float): noise std used for cluster centers
+                - sigma_count (float): noise std used for cluster counts
+                - count_min, count_max, count_mean, count_std: true (pre-noise)
+                  count diagnostics
+                - occupied_quadrants (int): number of non-empty quadrants
     """
-    from utils.ortho_clustering import orthogonal_basis, ortho_assign, cluster_centers, noisy_cluster_centers, cluster_counts
+    from utils.ortho_clustering import (
+        orthogonal_basis, ortho_assign,
+        cluster_centers, cluster_counts,
+        noisy_cluster_centers, noisy_cluster_counts,
+        compute_dp_sigmas,
+    )
+ 
     values = np.vstack(value_lists)
+ 
     if params.fixed:
         values = unscale(values)
+ 
     basis = orthogonal_basis(
         values, params.d_prime,
         method=params.basis_method,
@@ -199,27 +227,53 @@ def ortho_proto(value_lists, params: Params, method="masked"):
         clip_norm=params.basis_clip_norm,
         data_fraction=params.basis_data_fraction,
     )
+ 
     labels = ortho_assign(values, params.d_prime, seed=params.seed, basis=basis)
+ 
+    # True counts are always computed for diagnostic reporting
+    true_counts, _ = cluster_counts(labels)
 
-    counts, _ = cluster_counts(labels)
-    print(f"  Quadrant counts (d'={params.d_prime}, sigma={params.sigma}): "
-          f"min={counts.min()}, max={counts.max()}, "
-          f"mean={counts.mean():.1f}, std={counts.std():.1f}, "
-          f"occupied={len(counts)}/{2**params.d_prime}")
 
-    if params.sigma > 0:
-        centers, _ = noisy_cluster_centers(values, labels, params.sigma, seed=params.seed)
+    n = params.data_size
+
+    delta = 1 / (n * np.log(n))
+ 
+    if params.eps > 0:
+        sigma_centers, sigma_count = compute_dp_sigmas(
+            params.eps, delta, params.sigma_fraction
+        )
+        centers, _ = noisy_cluster_centers(
+            values, labels, sigma_centers, seed=params.seed
+        )
+        noisy_counts, _ = noisy_cluster_counts(
+            labels, sigma_count, seed=params.seed
+        )
     else:
+        sigma_centers, sigma_count = 0.0, 0.0
         centers, _ = cluster_centers(values, labels)
-
+        noisy_counts = true_counts.astype(float)
+ 
+    print(
+        f" Quadrant counts (d'={params.d_prime}, "
+        f"epsilon={params.eps}, delta={delta}, "
+        f"sigma_fraction={params.sigma_fraction}, "
+        f"sigma_centers={sigma_centers:.4f}, sigma_count={sigma_count:.4f}): "
+        f"min={true_counts.min()}, max={true_counts.max()}, "
+        f"mean={true_counts.mean():.1f}, std={true_counts.std():.1f}, "
+        f"occupied={len(true_counts)}/{2**params.d_prime}"
+    )
+ 
     if params.fixed:
         centers = to_fixed(centers)
-
+ 
     return centers, {
         "unassigned": 0,
-        "count_min": int(counts.min()),
-        "count_max": int(counts.max()),
-        "count_mean": float(counts.mean()),
-        "count_std": float(counts.std()),
-        "occupied_quadrants": len(counts),
+        "sigma_centers": sigma_centers,
+        "sigma_count": sigma_count,
+        "count_min": int(true_counts.min()),
+        "count_max": int(true_counts.max()),
+        "count_mean": float(true_counts.mean()),
+        "count_std": float(true_counts.std()),
+        "occupied_quadrants": len(true_counts),
     }
+ 

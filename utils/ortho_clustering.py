@@ -401,6 +401,37 @@ def cluster_counts(labels):
     return counts, unique_labels
 
 
+
+def noisy_cluster_counts(labels, sigma, seed=42):
+    """
+    Compute cluster counts with Gaussian noise added to each count.
+
+    Follows the same DP mechanism structure as noisy_cluster_centers:
+    adds isotropic Gaussian noise N(0, sigma^2) to each cluster's scalar
+    count. L2 sensitivity of a count query is 1 (adding/removing one
+    unit-norm point changes exactly one cluster's count by 1).
+
+    Args:
+        labels:         (n,) integer cluster labels
+        sigma:          std dev of Gaussian noise added to each count
+        seed:           random seed for noise generation
+
+    Returns:
+        counts:         (k,) array of noisy counts (floats; may be negative
+                        for very small clusters with large sigma)
+        unique_labels:  (k,) sorted array of label ids
+    """
+    unique_labels = np.unique(labels)
+    rng = np.random.RandomState(seed)
+
+    counts = np.array(
+        [np.sum(labels == lab) for lab in unique_labels],
+        dtype=float
+    )
+    noise = rng.normal(0, sigma, size=len(unique_labels))
+    return counts + noise, unique_labels
+
+
 def cluster_centers(values, labels):
     """
     Compute the centroid of each cluster.
@@ -419,3 +450,59 @@ def cluster_centers(values, labels):
     for i, lab in enumerate(unique_labels):
         centers[i] = values[labels == lab].mean(axis=0)
     return centers, unique_labels
+
+
+
+def compute_dp_sigmas(epsilon, delta, sigma_fraction):
+    """
+    Split a total (epsilon, delta) DP budget between noisy_cluster_centers
+    and noisy_cluster_counts such that:
+
+        epsilon_centers = sigma_fraction * epsilon_count
+
+    Assumes:
+    - Unit-norm data points  => L2 sensitivity of per-cluster sum query = 1
+    - Scalar count query     => L2 sensitivity = 1
+    - Gaussian mechanism:      sigma = sqrt(2 ln(1.25 / delta_i)) / epsilon_i
+    - Basic composition:       epsilon_centers + epsilon_count = epsilon
+    - Equal delta split:       delta_centers = delta_count = delta / 2
+
+    Derivation:
+        epsilon_count   = epsilon / (1 + sigma_fraction)
+        epsilon_centers = epsilon * sigma_fraction / (1 + sigma_fraction)
+
+        gauss_const = sqrt(2 * ln(1.25 / (delta / 2)))
+        sigma_count   = gauss_const / epsilon_count
+        sigma_centers = gauss_const / epsilon_centers
+                      = sigma_count / sigma_fraction
+
+    Note: larger sigma_fraction allocates more epsilon to centers,
+    reducing sigma_centers (better centroid utility) at the cost of
+    increased sigma_count (noisier counts).
+
+    Args:
+        epsilon:          total privacy budget (epsilon_centers + epsilon_count)
+        delta:            total delta budget, split equally as delta/2 each
+        sigma_fraction:   ratio epsilon_centers / epsilon_count  (> 0)
+
+    Returns:
+        sigma_centers:  noise std for noisy_cluster_centers  (added to each cluster sum)
+        sigma_count:    noise std for noisy_cluster_counts   (added to each cluster count)
+    """
+    if sigma_fraction <= 0:
+        raise ValueError(f"sigma_fraction must be positive, got {sigma_fraction}")
+    if epsilon <= 0:
+        raise ValueError(f"epsilon must be positive, got {epsilon}")
+    if not (0 < delta < 1):
+        raise ValueError(f"delta must be in (0, 1), got {delta}")
+
+    delta_each = delta / 2
+    gauss_const = np.sqrt(2 * np.log(1.25 / delta_each))
+
+    eps_count   = epsilon / (1 + sigma_fraction)
+    eps_centers = epsilon * sigma_fraction / (1 + sigma_fraction)
+
+    sigma_count   = gauss_const / eps_count    # = gauss_const * (1 + sigma_fraction) / epsilon
+    sigma_centers = gauss_const / eps_centers  # = sigma_count / sigma_fraction
+
+    return sigma_centers, sigma_count

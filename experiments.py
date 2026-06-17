@@ -141,6 +141,7 @@ class ExperimentRunner:
 
         d_primes = self.params_list.get("d_primes", [None])
         sigmas = self.params_list.get("sigmas", [0.0])
+        sigma_fractions = self.params_list.get("sigma_fraction", [10.0])
         basis_methods = self.params_list.get("basis_methods", ["random"])
         basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
         basis_deltas = self.params_list.get("basis_deltas", [1e-5])
@@ -152,7 +153,7 @@ class ExperimentRunner:
         ):
             for eps_budget in self._get_eps_budgets(dp):
                 for d_prime in d_primes:
-                    for sigma in sigmas:
+                    for sigma_fraction in sigma_fractions:
                         for basis_method, basis_epsilon, basis_delta, basis_clip_norm, basis_data_fraction in itertools.product(
                                 basis_methods, basis_epsilons, basis_deltas, basis_clip_norms, basis_data_fractions
                         ):
@@ -169,7 +170,7 @@ class ExperimentRunner:
                             )
                             if d_prime is not None:
                                 params.d_prime = d_prime
-                            params.sigma = sigma
+                            params.sigma_fraction = sigma_fraction
                             params.basis_method = basis_method
                             params.basis_epsilon = basis_epsilon
                             params.basis_delta = basis_delta
@@ -186,7 +187,8 @@ class ExperimentRunner:
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
-        return [0] if dp == "none" else self.params_list["eps_budgets"]
+        is_ortho = self.protocol.__name__ == "ortho_proto"
+        return [0] if dp == "none" and not is_ortho else self.params_list["eps_budgets"]
 
     def run_experiment(self, params: Params) -> None:
         """Run experiment with given parameters multiple times."""
@@ -464,7 +466,7 @@ def main() -> None:
         params_list.update({
             "dps": ["none"],
             "methods": ["none"],
-            "eps_budgets": [0],
+            # "eps_budgets": [0],
             "posts": ["none"],
         })
         if "dpsgd_pca" in args.basis_method:

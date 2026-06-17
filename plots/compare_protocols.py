@@ -4,7 +4,7 @@ Compare clustering results between ortho protocol and original algorithms.
 Loads variances.csv (local protocol) and variances_ortho.csv (ortho protocol)
 from each dataset folder. For each dataset, generates one PDF per metric where:
   - rows  = d' values
-  - bars  = baseline algorithms first, then ortho sigma variants for that d'
+  - bars  = baseline algorithms first, then ortho eps variants for that d'
 
 Output: submission/accuracy/<dataset>/<MetricName>.pdf
 
@@ -78,7 +78,7 @@ def _label_color(label):
 def load_local_rows(df):
     """Extract representative baseline rows from local protocol results.
 
-    Returns rows tagged with sigma=None, d_prime=None.
+    Returns rows tagged with eps=None, d_prime=None.
     Picks best epsilon (lowest NICV) for each DP method.
     """
     nicv_col = "Normalized Intra-cluster Variance (NICV)"
@@ -92,10 +92,10 @@ def load_local_rows(df):
 
         if dp == "none":
             best = group.loc[group[nicv_col].idxmin()] if len(group) > 1 else group.iloc[0]
-            row = {"label": name, "sigma": None, "d_prime": None}
+            row = {"label": name, "eps": None, "d_prime": None}
         else:
             best = group.loc[group[nicv_col].idxmin()]
-            row = {"label": f"{name} (e={best['eps']})", "sigma": None, "d_prime": None}
+            row = {"label": f"{name} (e={best['eps']})", "eps": None, "d_prime": None}
 
         for metric in METRICS_DICT:
             if metric in best.index:
@@ -107,21 +107,21 @@ def load_local_rows(df):
 
 
 def load_ortho_rows(df):
-    """Extract ortho rows tagged with d_prime and sigma.
+    """Extract ortho rows tagged with d_prime and eps.
 
-    Label shows only sigma (d' is shown as the row/subplot label instead).
+    Label shows only eps (d' is shown as the row/subplot label instead).
     """
     rows = []
     for _, r in df.iterrows():
         d_prime = int(r.get("d_prime", 0))
-        sigma = float(r.get("sigma", 0.0))
+        eps = float(r.get("eps", 0.0))
         basis = r.get("basis_method", "")
         basis_short = {"random": "Rand", "svd_pca": "SVD", "dpsgd_pca": "DP-SGD"}.get(basis, basis)
-        if sigma > 0:
-            label = f"Ortho-{basis_short} (σ={sigma})"
+        if eps > 0:
+            label = f"Ortho-{basis_short} (ε ={eps})"
         else:
             label = f"Ortho-{basis_short}"
-        row = {"label": label, "sigma": sigma, "d_prime": d_prime, "basis_method": basis}
+        row = {"label": label, "eps": eps, "d_prime": d_prime, "basis_method": basis}
         for metric in METRICS_DICT:
             if metric in r.index:
                 row[metric] = r[metric]
@@ -134,7 +134,7 @@ def load_ortho_rows(df):
 # Plotting: one PDF per dataset per metric
 # ---------------------------------------------------------------------------
 
-def plot_dataset_metric(rows, metric, dataset, d_primes, sigmas, out_folder):
+def plot_dataset_metric(rows, metric, dataset, d_primes, epss, out_folder):
     """
     For one dataset + one metric, generate a PDF with:
       rows  = d' values (one subplot each)
@@ -143,7 +143,7 @@ def plot_dataset_metric(rows, metric, dataset, d_primes, sigmas, out_folder):
     Saved as <MetricShortName>.pdf inside out_folder.
     """
     baseline_rows = [r for r in rows if r["d_prime"] is None]
-    n_bars = len(baseline_rows) + len(sigmas)
+    n_bars = len(baseline_rows) + len(epss)
     cell_w = max(8, n_bars * 1.2)
 
     fig, axes = plt.subplots(len(d_primes), 1,
@@ -153,10 +153,10 @@ def plot_dataset_metric(rows, metric, dataset, d_primes, sigmas, out_folder):
     for row_i, d_prime in enumerate(d_primes):
         ax = axes[row_i][0]
 
-        # Ortho rows for this d', ordered by sigma
+        # Ortho rows for this d', ordered by eps
         ortho_rows = sorted(
             [r for r in rows if r["d_prime"] == d_prime],
-            key=lambda r: r["sigma"]
+            key=lambda r: r["eps"]
         )
 
         display_rows = baseline_rows + ortho_rows
@@ -224,9 +224,9 @@ def process_datasets(results_folder, exp_type):
         for r in rows:
             all_rows.append({**r, "dataset": dataset})
 
-        # d' values and sigma values present in this dataset's ortho data
+        # d' values and eps values present in this dataset's ortho data
         d_primes = sorted(set(r["d_prime"] for r in rows if r["d_prime"] is not None))
-        sigmas = sorted(set(r["sigma"] for r in rows if r["sigma"] is not None))
+        epss = sorted(set(r["eps"] for r in rows if r["eps"] is not None))
 
         if not d_primes:
             # No ortho data yet — skip plotting for now
@@ -235,9 +235,9 @@ def process_datasets(results_folder, exp_type):
 
         # One PDF per metric
         for metric in METRICS_DICT:
-            plot_dataset_metric(rows, metric, dataset, d_primes, sigmas, str(folder))
+            plot_dataset_metric(rows, metric, dataset, d_primes, epss, str(folder))
 
-        print(f"  {dataset}: {len(rows)} entries, {len(d_primes)} d' values, {len(sigmas)} sigmas")
+        print(f"  {dataset}: {len(rows)} entries, {len(d_primes)} d' values, {len(epss)} epss")
 
     # Summary CSV
     if all_rows:

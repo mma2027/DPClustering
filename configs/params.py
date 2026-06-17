@@ -55,7 +55,8 @@ class Params:
     post: str = "none"
     fixed: bool = True
     d_prime: int = 3
-    sigma: float = 0.0
+    sigma: float = 0.0 #TODO: To remove later
+    sigma_fraction: float = 10.0
     basis_method: str = "dpsgd_pca"
     basis_epsilon: float = 0.5
     basis_delta: float = 1e-5
