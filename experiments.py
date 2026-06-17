@@ -140,7 +140,6 @@ class ExperimentRunner:
         dimension, data_size = self.values.shape[1], self.values.shape[0]
 
         d_primes = self.params_list.get("d_primes", [None])
-        sigmas = self.params_list.get("sigmas", [0.0])
         sigma_fractions = self.params_list.get("sigma_fraction", [10.0])
         basis_methods = self.params_list.get("basis_methods", ["random"])
         basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
@@ -173,7 +172,6 @@ class ExperimentRunner:
                             params.sigma_fraction = sigma_fraction
                             params.basis_method = basis_method
                             params.basis_epsilon = basis_epsilon
-                            params.basis_delta = basis_delta
                             params.basis_clip_norm = basis_clip_norm
                             params.basis_data_fraction = basis_data_fraction
 
@@ -309,7 +307,7 @@ def parse_args() -> Namespace:
     parser.add_argument("--exp_type", default="test", help="type of experiment")
     parser.add_argument("--datasets", nargs="+", default=accuracy_datasets, help="datasets to run")  # changed default from ["mnist"] to accuracy_datasets
     parser.add_argument("--plot", action="store_true", help="plot clusters")
-    parser.add_argument("--num_runs", default=100, type=int, help="number of runs")
+    parser.add_argument("--num_runs", default=10, type=int, help="number of runs")
     parser.add_argument(
         "--method",
         default="diagonal_then_frac",
@@ -340,13 +338,6 @@ def parse_args() -> Namespace:
         type=int,
         default=None,
         help="d_prime values to sweep (ortho protocol only)"
-    )
-    parser.add_argument(
-        "--sigma",
-        nargs="*",
-        type=float,
-        default=None,
-        help="Gaussian noise std dev(s) for ortho DP (omit for default sweep)"
     )
     parser.add_argument(
         "--basis_method",
@@ -469,22 +460,22 @@ def main() -> None:
             # "eps_budgets": [0],
             "posts": ["none"],
         })
-        if "dpsgd_pca" in args.basis_method:
-            if args.d_prime is not None:
-                params_list["d_primes"] = [max(1, min(5, d)) for d in args.d_prime]
-            else:
-                params_list["d_primes"] = [1, 2, 3, 4, 5]
-        elif args.d_primes is not None:
+        # if "dpsgd_pca" in args.basis_method:
+        #     if args.d_primes is not None:
+        #         # Why is it only from 1 to 5?
+        #         # params_list["d_primes"] = [max(1, min(5, d)) for d in args.d_prime]
+        #     else:
+        #         params_list["d_primes"] = [1, 2, 3, 4, 5]
+        if args.d_primes is not None:
             params_list["d_primes"] = args.d_primes
         else:
             params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
-        if args.sigma is not None:
-            params_list["sigmas"] = args.sigma if args.sigma else [0.0]
-        else:
-            params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
+        # if args.sigma is not None:
+        #     params_list["sigmas"] = args.sigma if args.sigma else [0.0]
+        # else:
+        #     params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
         params_list["basis_methods"] = args.basis_method
         params_list["basis_epsilons"] = [args.basis_epsilon]
-        params_list["basis_deltas"] = [args.basis_delta]
         params_list["basis_clip_norms"] = [args.basis_clip_norm]
         params_list["basis_data_fractions"] = [args.basis_data_fraction]
     else:
