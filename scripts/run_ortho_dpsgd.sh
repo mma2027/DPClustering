@@ -24,7 +24,8 @@ echo " Results folder : $RESULTS_FOLDER"
 echo " Started        : $(date)"
 echo "========================================"
 
-DATASETS="iris s1 house lsun wine yeast breast mnist"
+# DATASETS="iris s1 house lsun wine yeast breast mnist"
+DATASETS="mnist"
 
 # ── 1. Run Lloyd/FastLloyd (local protocol) ───────────────────────────────────
 echo ""
@@ -43,6 +44,7 @@ python3 experiments.py \
     --exp_type accuracy \
     --protocol ortho \
     --basis_method random svd_pca dpsgd_pca \
+    --d_primes 5 10 15 20 \
     --datasets $DATASETS \
     --results_folder "$RESULTS_FOLDER" &
 ORTHO_PID=$!
@@ -58,8 +60,8 @@ echo "Ortho protocol done: $(date)"
 # ── 4. Generate plots ─────────────────────────────────────────────────────────
 echo ""
 echo "=== Generating comparison plots ==="
-python3 -m plots.compare_protocols "$RESULTS_FOLDER"
-python3 -m plots.compare_basis "$RESULTS_FOLDER"
+python3 -m plots.compare_methods --ignore SuLloyd Ortho-SVD "$RESULTS_FOLDER"
+# python3 -m plots.compare_basis "$RESULTS_FOLDER"
 
 echo ""
 echo "========================================"
