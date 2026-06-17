@@ -14,7 +14,7 @@ Usage:
     python -m plots.compare_basis                         # submission/, accuracy
     python -m plots.compare_basis my_results              # custom folder
     python -m plots.compare_basis my_results --exp_type scale
-    python -m plots.compare_basis my_results --sigma 0.0  # filter to one sigma
+    python -m plots.compare_basis my_results --eps 1.0   # filter to one epsilon
 """
 
 import os
@@ -90,18 +90,18 @@ def _best_dpsgd_row(group):
     return group.iloc[0]
 
 
-def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, sigma_filter, out_folder):
+def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, eps_filter, out_folder):
     """Plot grouped bars comparing basis methods across d' values for one metric.
 
     Layout: one bar group per d'.  Within each group: [random, svd_pca, dpsgd_pca].
     Local baselines (Lloyd, FastLloyd) are drawn as horizontal reference lines.
 
     Args:
-        ortho_df: DataFrame from variances_ortho.csv, already filtered to one sigma
+        ortho_df: DataFrame from variances_ortho.csv, already filtered to one epsilon
         local_baselines: dict from _load_local_baselines
         metric: full metric column name
         dataset: dataset name (for title)
-        sigma_filter: the sigma value that was used to filter (for subtitle)
+        eps_filter: the epsilon value that was used to filter (for subtitle)
         out_folder: directory to save the PDF
     """
     if metric not in ortho_df.columns:
@@ -159,8 +159,8 @@ def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, sigma_filt
                    linewidth=1.5, label=label, alpha=0.8)
 
     short = METRICS_DICT.get(metric, metric)
-    sigma_str = f"  (sigma={sigma_filter})" if sigma_filter is not None else ""
-    ax.set_title(f"{dataset} — {short}{sigma_str}", fontsize=14)
+    eps_str = f"  (eps={eps_filter})" if eps_filter is not None else ""
+    ax.set_title(f"{dataset} — {short}{eps_str}", fontsize=14)
     ax.set_xlabel("d'")
     ax.set_ylabel(short)
     ax.set_xticks(group_positions)
@@ -170,13 +170,13 @@ def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, sigma_filt
 
     fig.tight_layout()
     safe = short.replace(" ", "_").replace("/", "_")
-    sigma_tag = f"_sigma{sigma_filter}" if sigma_filter is not None else ""
-    out_path = os.path.join(out_folder, f"basis_compare_{safe}{sigma_tag}.pdf")
+    eps_tag = f"_eps{eps_filter}" if eps_filter is not None else ""
+    out_path = os.path.join(out_folder, f"basis_compare_{safe}{eps_tag}.pdf")
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
 
-def process_datasets(results_folder, exp_type, sigma_filter):
+def process_datasets(results_folder, exp_type, eps_filter):
     base = Path(results_folder) / exp_type
     if not base.is_dir():
         print(f"Results folder not found: {base}")
@@ -195,23 +195,23 @@ def process_datasets(results_folder, exp_type, sigma_filter):
         if "basis_method" not in ortho_df.columns:
             print(f"  {dataset}: variances_ortho.csv has no basis_method column, skipping")
             continue
+        if "eps" not in ortho_df.columns:
+            print(f"  {dataset}: variances_ortho.csv has no eps column, skipping")
+            continue
 
-        # Filter to requested sigma (or use all sigmas if None)
-        if sigma_filter is not None:
-            ortho_df = ortho_df[np.isclose(ortho_df["sigma"].fillna(0.0), sigma_filter)]
-        else:
-            # Default: use sigma=0 if available, otherwise all
-            if 0.0 in ortho_df["sigma"].values:
-                ortho_df = ortho_df[np.isclose(ortho_df["sigma"].fillna(0.0), 0.0)]
+        # Filter to one epsilon so the basis comparison is at a fixed privacy
+        # budget. Default to the largest eps available (least centroid noise).
+        dataset_eps = eps_filter if eps_filter is not None else ortho_df["eps"].max()
+        ortho_df = ortho_df[np.isclose(ortho_df["eps"].fillna(0.0), dataset_eps)]
 
         if ortho_df.empty:
-            print(f"  {dataset}: no rows after sigma filter, skipping")
+            print(f"  {dataset}: no rows after eps filter, skipping")
             continue
 
         local_baselines = _load_local_baselines(folder / "variances.csv")
 
         for metric in METRICS_DICT:
-            plot_basis_comparison(ortho_df, local_baselines, metric, dataset, sigma_filter, str(folder))
+            plot_basis_comparison(ortho_df, local_baselines, metric, dataset, dataset_eps, str(folder))
 
         # Collect summary: best NICV per basis_method per d'
         nicv = "Normalized Intra-cluster Variance (NICV)"
@@ -222,7 +222,7 @@ def process_datasets(results_folder, exp_type, sigma_filter):
                     "dataset": dataset,
                     "basis_method": basis,
                     "d_prime": int(d_prime),
-                    "sigma": row.get("sigma", 0.0),
+                    "eps": row.get("eps", 0.0),
                     **{short: row.get(full, np.nan) for full, short in METRICS_DICT.items()},
                 })
 
@@ -243,11 +243,11 @@ def parse_args():
                         help="root results folder (default: submission)")
     parser.add_argument("--exp_type", default="accuracy",
                         help="experiment type subfolder (default: accuracy)")
-    parser.add_argument("--sigma", type=float, default=None,
-                        help="filter to a specific sigma value (default: use sigma=0 if present)")
+    parser.add_argument("--eps", type=float, default=None,
+                        help="filter to a specific epsilon budget (default: largest eps present)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    process_datasets(args.results_folder, args.exp_type, args.sigma)
+    process_datasets(args.results_folder, args.exp_type, args.eps)

@@ -83,6 +83,7 @@ Rscript scripts/generator.R
 │   ├── ablation_plots.py      # Visualization for ablation studies
 │   ├── compare_basis.py       # Compare random / SVD PCA / DP-SGD PCA basis methods
 │   ├── compare_protocols.py   # Compare ortho vs original algorithm results
+│   ├── compare_methods.py     # Compare ortho vs original algorithm results (line charts)
 │   ├── per_dataset.py         # Dataset-specific result visualization
 │   ├── scale_heatmap.py  # Heatmap generation for scalability results
 │   ├── synthetic_bar.py  # Bar charts for synthetic dataset results
@@ -174,7 +175,7 @@ Key parameters include:
 - `--alpha`: Maximum distance parameter
 - `--post`: Post-processing method for centroids
 - `--d_primes`: d' values to sweep when using `--protocol ortho` (default: 1 2 3 4 5)
-- `--sigma`: Gaussian noise std dev(s) for ortho DP centroids (default sweeps 0.0, 0.1, 0.5, 1.0, 5.0)
+- `--sigma_fraction`: ratio of noise for cluster centers over cluster counts (both require privacy)  (default: 10)
 - `--basis_data_fraction`: fraction of data to subsample before DP-SGD PCA (default: 0.1; see [data subsampling](#data-subsampling-for-dp-sgd))
 - `--results_folder`: Folder to store results
 
@@ -292,6 +293,7 @@ from utils.ortho_clustering import (
     orthogonal_basis, svd_pca_basis, dpsgd_pca_basis,
     orthogonalize_svd, random_orthogonal_basis,
     ortho_assign, cluster_centers, cluster_counts, noisy_cluster_centers,
+    noisy_cluster_centers_and_counts, compute_dp_sigmas,
 )
 ```
 
@@ -308,7 +310,9 @@ from utils.ortho_clustering import (
 - `ortho_assign(values, d_prime, seed=42, basis=None)` — project `values` onto `basis` (or generate a fresh random basis if `None`) and return integer cluster labels in `[0, 2^d' - 1]` based on the sign pattern of each projection.
 - `cluster_centers(values, labels)` — compute the exact centroid of each cluster. Returns `(centers, unique_labels)`.
 - `cluster_counts(labels)` — return `(counts, unique_labels)` giving the number of points per cluster.
-- `noisy_cluster_centers(values, labels, sigma, seed=42)` — compute centroids with Gaussian noise `N(0, sigma²)` added to each cluster *sum* before dividing by count. The effective per-dimension noise on the centroid is `sigma / count`. This is the DP mechanism for sum queries applied to centroids.
+- `noisy_cluster_centers(values, labels, sigma, seed=42)` — compute centroids with Gaussian noise `N(0, sigma²)` added to each cluster *sum* before dividing by the *true* count. The effective per-dimension noise on the centroid is `sigma / count`. This is the DP mechanism for the sum query alone (the count is not privatized).
+- `compute_dp_sigmas(epsilon, delta, sigma_fraction)` — split a total `(epsilon, delta)` budget between the cluster-sum query and the count query, returning `(sigma_centers, sigma_count)`. The budget is allocated so that `epsilon_centers = sigma_fraction × epsilon_count` (with `delta` split equally), so a larger `sigma_fraction` gives more budget to the centers (lower `sigma_centers`, better centroid utility) at the cost of noisier counts. Uses the Gaussian mechanism `sigma = sqrt(2 ln(1.25/delta_i)) / epsilon_i` with unit-norm data (L2 sensitivity 1).
+- `noisy_cluster_centers_and_counts(values, labels, sigma_centers, sigma_count, seed=42)` — release a noisy sum *and* a noisy count per cluster, then form the centroid as `noisy_sum / noisy_count`. The centroid is pure post-processing of two Gaussian-mechanism releases and never divides by the true count, so it does not leak the exact count. This is the DP centroid mechanism used by the ortho protocol; the two noise levels come from `compute_dp_sigmas`.
 
 ### Running with the experiment framework
 
@@ -324,8 +328,10 @@ python experiments.py --exp_type scale --protocol ortho
 # Custom d' sweep and datasets
 python experiments.py --exp_type accuracy --protocol ortho --d_primes 2 3 4 --datasets iris mnist
 
-# Custom sigma sweep (noise added to cluster sums for DP centroids)
-python experiments.py --exp_type accuracy --protocol ortho --sigma 0.0 1.0 10.0
+# The noisy centroids are calibrated from the experiment's epsilon budget
+# (eps_budgets in configs/defaults.py, e.g. 0.5 1 2 4 for accuracy), split
+# between cluster centers and counts by sigma_fraction (default 10)
+python experiments.py --exp_type accuracy --protocol ortho
 
 # Random basis (no DP for basis computation)
 python experiments.py --exp_type accuracy --protocol ortho --basis_method random --d_primes 1 2 3
@@ -341,7 +347,7 @@ python experiments.py --exp_type accuracy --protocol ortho \
     --datasets iris mnist --num_runs 5
 ```
 
-When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). `sigma` controls Gaussian noise added to cluster sums before computing centroids; passing `--sigma` with no values defaults to `0.0`. Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
+When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). The DP centroids are calibrated from the experiment's total epsilon budget (`eps_budgets` in `configs/defaults.py`, swept like every other protocol) rather than a directly supplied noise level: `compute_dp_sigmas` splits that budget between the cluster-sum query and the count query according to `sigma_fraction` (default 10), and `noisy_cluster_centers_and_counts` releases a noisy sum and noisy count per cluster. Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
 
 **Basis parameters (ortho protocol only):**
 
@@ -349,8 +355,7 @@ When `--protocol ortho` is used, DP/method/post parameters are automatically set
 |----------|---------|-------------|
 | `--basis_method` | `dpsgd_pca` | Basis generation method: `dpsgd_pca` (private PCA via DP-SGD), `svd_pca` (non-private SVD PCA, oracle), or `random` (random orthonormal, no data used) |
 | `--d_prime` | `1 2 3 4 5` | d' value(s) to sweep (space-separated); number of basis vectors and log₂ of max clusters |
-| `--basis_epsilon` | `0.5` | Privacy budget ε for the DP-SGD basis step |
-| `--basis_delta` | `1e-5` | Privacy δ for the DP-SGD basis step (standard: `1/(n·log(n))`) |
+| `--basis_epsilon` | `0.5` | Fraction of privacy budget ε for the DP-SGD basis step |
 | `--basis_clip_norm` | `1.0` | Per-sample gradient clipping norm; bounds sensitivity to `clip_norm` |
 | `--basis_data_fraction` | `0.1` | Fraction of data used for DP-SGD training; reduces noise by cutting the number of SGD steps |
 
@@ -392,8 +397,8 @@ python -m plots.compare_basis
 # Custom results folder
 python -m plots.compare_basis my_results
 
-# Filter to a specific sigma value
-python -m plots.compare_basis my_results --sigma 0.5
+# Filter to a specific epsilon value
+python -m plots.compare_basis my_results --eps 0.5
 ```
 
 This generates one PDF per metric per dataset (e.g., `basis_compare_NICV.pdf`) showing grouped bars over d' values, with one bar group per basis method. Lloyd and FastLloyd baselines are drawn as horizontal reference lines. A summary CSV (`basis_comparison_summary.csv`) is also written to the experiment folder.
