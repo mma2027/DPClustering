@@ -281,4 +281,126 @@ def ortho_proto(value_lists, params: Params, method="masked"):
         "count_std": float(true_counts.std()),
         "occupied_quadrants": len(true_counts),
     }
+
+
+def lsh_proto(value_lists, params: Params, method="masked"):
+    """Protocol adapter for DP LSH prefix-tree clustering.
+
+    Uses the same SimHash basis as ortho_proto, but instead of the full
+    2^d' sign-pattern partition it grows an LSH prefix tree (see LSHTree.py),
+    pruning any branch whose *noisy* point count falls below a threshold. Each
+    surviving leaf yields one (noisy) centroid, so the number of clusters is
+    data-dependent rather than fixed at 2^d'.
+
+    Privacy accounting:
+        delta         = 1 / (n log n)
+        basis (dpsgd) = (basis_epsilon * eps, basis_epsilon * delta), composed
+                        with the aggregation by basic composition on eps.
+        aggregation   = ((1 - basis_epsilon) * eps, (1 - basis_epsilon) * delta),
+                        accounted RIGOROUSLY in zero-concentrated DP (zCDP) via
+                        compute_dp_sigmas_zcdp. The aggregation is one leaf-sum
+                        release plus one count histogram per tree level; the
+                        L = max_depth + 1 count releases compose sequentially in
+                        zCDP (each level is a single sensitivity-1 mechanism by
+                        parallel composition). count_levels uses the
+                        data-independent bound max_depth + 1, since the realized
+                        tree depth is itself privacy-sensitive.
+
+    As in ortho_proto, only basis_method == "dpsgd_pca" spends basis budget;
+    "random"/"svd_pca" leave the whole (eps, delta) for aggregation, and eps == 0
+    means exact (non-private) counts/centroids.
+
+    Args:
+        value_lists (list): list of numpy arrays (one per client).
+        params (Params): uses d_prime, seed, eps, basis_method, basis_epsilon,
+            sigma_fraction, basis_clip_norm, basis_data_fraction, tree_max_depth,
+            min_count_in_node, min_count_to_branch, data_size, fixed.
+        method (str, optional): unused, kept for protocol interface compatibility.
+
+    Returns:
+        tuple: (leaf_centroids, stats).
+    """
+    from utils.ortho_clustering import orthogonal_basis, compute_dp_sigmas_zcdp
+    from LSHTree import build_lsh_tree
+
+    values = np.vstack(value_lists)
+    if params.fixed:
+        values = unscale(values)
+
+    n = params.data_size
+    delta = 1.0 / (n * np.log(n))
+
+    # --- split the total budget: only dpsgd_pca pays for the basis (as in ortho) ---
+    if params.basis_method == "dpsgd_pca":
+        assert params.eps > 0, "dpsgd_pca basis needs eps > 0 to take a budget fraction"
+        assert 0.0 < params.basis_epsilon < 1.0, \
+            "basis_epsilon must be a fraction in (0, 1) for dpsgd_pca"
+        eps_basis,  delta_basis = params.basis_epsilon * params.eps, params.basis_epsilon * delta
+        eps_agg,    delta_agg   = params.eps - eps_basis, delta - delta_basis
+    else:
+        eps_basis, delta_basis = 0.0, 0.0
+        eps_agg,   delta_agg   = params.eps, delta
+
+    basis = orthogonal_basis(
+        values, params.d_prime,
+        method=params.basis_method, seed=params.seed,
+        epsilon=eps_basis, delta=delta_basis,
+        clip_norm=params.basis_clip_norm,
+        data_fraction=params.basis_data_fraction,
+    )
+
+    # Worst-case tree depth (the tree can't go deeper than the basis is wide).
+    max_depth = min(params.tree_max_depth or params.d_prime, basis.shape[1])
+
+    # --- noise levels for counts (pruning) and leaf centroids; exact when eps == 0 ---
+    # Rigorous zCDP: 1 leaf-sum release + (max_depth + 1) sequential count releases.
+    if params.eps > 0:
+        sigma_centers, sigma_count = compute_dp_sigmas_zcdp(
+            eps_agg, delta_agg, params.sigma_fraction, count_levels=max_depth + 1
+        )
+    else:
+        sigma_centers, sigma_count = 0.0, 0.0
+
+    tree = build_lsh_tree(
+        values, basis,
+        max_depth=max_depth,
+        min_count_to_branch=params.min_count_to_branch,
+        min_count_in_node=params.min_count_in_node,
+        count_sigma=sigma_count,
+        base_seed=params.seed,
+    )
+
+    centers = tree.private_centers(center_sigma=sigma_centers)  # (num_leaves, d)
+
+    leaf_counts = np.array([len(leaf.points) for leaf in tree.leaves])  # true, diagnostics
+    leaf_depths = np.array([leaf.depth for leaf in tree.leaves])
+
+    print(
+        f" LSH tree (d'={params.d_prime}, max_depth={max_depth}, basis={params.basis_method}, "
+        f"eps={params.eps}, delta={delta:.3g}, "
+        f"eps_basis={eps_basis:.3f}, eps_agg={eps_agg:.3f}, "
+        f"min_count_in_node={params.min_count_in_node}, "
+        f"min_count_to_branch={params.min_count_to_branch}, "
+        f"sigma_centers={sigma_centers:.4f}, sigma_count={sigma_count:.4f}): "
+        f"leaves={len(tree.leaves)}, depth={leaf_depths.min()}-{leaf_depths.max()}, "
+        f"covered={int(leaf_counts.sum())}/{len(values)}"
+    )
+
+    if params.fixed:
+        centers = to_fixed(centers)
+
+    return centers, {
+        "unassigned": 0,
+        "eps_basis": eps_basis,
+        "eps_agg": eps_agg,
+        "sigma_centers": sigma_centers,
+        "sigma_count": sigma_count,
+        "num_leaves": len(tree.leaves),
+        "min_leaf_depth": int(leaf_depths.min()),
+        "max_leaf_depth": int(leaf_depths.max()),
+        "count_min": int(leaf_counts.min()),
+        "count_max": int(leaf_counts.max()),
+        "count_mean": float(leaf_counts.mean()),
+        "points_covered": int(leaf_counts.sum()),
+    }
  

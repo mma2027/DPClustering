@@ -141,6 +141,8 @@ class ExperimentRunner:
 
         d_primes = self.params_list.get("d_primes", [None])
         sigma_fractions = self.params_list.get("sigma_fraction", [10.0])
+        tree_max_depth = self.params_list.get("tree_max_depth", 0)
+        tree_min_count = self.params_list.get("tree_min_count", 0.0)
         basis_methods = self.params_list.get("basis_methods", ["random"])
         basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
         basis_deltas = self.params_list.get("basis_deltas", [1e-5])
@@ -170,6 +172,9 @@ class ExperimentRunner:
                             if d_prime is not None:
                                 params.d_prime = d_prime
                             params.sigma_fraction = sigma_fraction
+                            params.tree_max_depth = tree_max_depth
+                            params.min_count_in_node = tree_min_count
+                            params.min_count_to_branch = tree_min_count
                             params.basis_method = basis_method
                             params.basis_epsilon = basis_epsilon
                             params.basis_clip_norm = basis_clip_norm
@@ -185,8 +190,10 @@ class ExperimentRunner:
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
-        is_ortho = self.protocol.__name__ == "ortho_proto"
-        return [0] if dp == "none" and not is_ortho else self.params_list["eps_budgets"]
+        # Projection protocols (ortho, lsh) always sweep the eps budgets, since
+        # their privacy comes from eps directly rather than from `dp`.
+        is_projection = self.protocol.__name__ in ("ortho_proto", "lsh_proto")
+        return [0] if dp == "none" and not is_projection else self.params_list["eps_budgets"]
 
     def run_experiment(self, params: Params) -> None:
         """Run experiment with given parameters multiple times."""
@@ -195,9 +202,13 @@ class ExperimentRunner:
         successful_experiments = experiment_count = 0
 
         # Show current config
-        is_ortho = self.protocol.__name__ == "ortho_proto"
-        if is_ortho:
+        proto_name = self.protocol.__name__
+        if proto_name == "ortho_proto":
             config_desc = f"d_prime={params.d_prime}, clusters=2^{params.d_prime}={2**params.d_prime}"
+        elif proto_name == "lsh_proto":
+            max_depth = params.tree_max_depth or params.d_prime
+            config_desc = (f"d_prime={params.d_prime}, max_depth={max_depth}, "
+                           f"eps={params.eps}, min_count={params.min_count_in_node}")
         else:
             config_desc = f"dp={params.dp}, method={params.method}, eps={params.eps}, iters={params.iters}"
         print(f"\n[{self.dataset}] {self.protocol.__name__} | {config_desc} | k={params.k}")
@@ -329,7 +340,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--protocol",
         default="local",
-        choices=["local", "ortho"],
+        choices=["local", "ortho", "lsh"],
         help="clustering protocol to use"
     )
     parser.add_argument(
@@ -376,6 +387,19 @@ def parse_args() -> Namespace:
         default=0.1,
         type=float,
         help="fraction of data to subsample before running DP-SGD PCA (default: 0.1)"
+    )
+    parser.add_argument(
+        "--tree_max_depth",
+        default=0,
+        type=int,
+        help="max LSH-tree depth for --protocol lsh (0 -> use d_prime)"
+    )
+    parser.add_argument(
+        "--tree_min_count",
+        default=0.0,
+        type=float,
+        help="noisy-count pruning threshold for --protocol lsh; a branch with "
+             "fewer noisy points is pruned and not branched (default: 0 -> no pruning)"
     )
     return parser.parse_args()
 
@@ -448,12 +472,19 @@ def main() -> None:
         num_clients = comm.world_size - 1
         params_list["num_clients"] = num_clients
         exp_type = f"timing_{num_clients}"
-    elif args.protocol == "ortho":
-        from utils.protocols import ortho_proto
-        proto = ortho_proto
+    elif args.protocol in ("ortho", "lsh"):
+        if args.protocol == "ortho":
+            from utils.protocols import ortho_proto
+            proto = ortho_proto
+        else:
+            from utils.protocols import lsh_proto
+            proto = lsh_proto
+            # LSH prefix-tree pruning thresholds (ignored by ortho)
+            params_list["tree_max_depth"] = args.tree_max_depth
+            params_list["tree_min_count"] = args.tree_min_count
         with_comm = False
         params_list["num_clients"] = 2
-        # Ortho doesn't use DP/method/post — collapse to single "none" values
+        # ortho/lsh don't use DP/method/post — collapse to single "none" values
         params_list.update({
             "dps": ["none"],
             "methods": ["none"],

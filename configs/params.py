@@ -61,6 +61,10 @@ class Params:
     basis_epsilon: float = 0.2 #Fraction of privacy for private basis
     basis_clip_norm: float = 1.0
     basis_data_fraction: float = 0.1
+    # LSH prefix-tree protocol (lsh_proto)
+    tree_max_depth: int = 0            # 0 -> use d_prime as the max tree depth
+    min_count_in_node: float = 0.0     # prune a child branch below this noisy count
+    min_count_to_branch: float = 0.0   # only branch nodes at/above this noisy count
 
     DEFAULT_BOUNDS = (-1, 1)
     MAX_RETRIES = 100

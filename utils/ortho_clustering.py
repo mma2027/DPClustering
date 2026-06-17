@@ -509,6 +509,83 @@ def compute_dp_sigmas(epsilon, delta, sigma_fraction):
     return sigma_centers, sigma_count
 
 
+def zcdp_rho_from_epsilon(epsilon, delta):
+    """Largest rho such that rho-zCDP still implies (epsilon, delta)-DP.
+
+    Inverts the standard conversion (Bun & Steinke 2016): a rho-zCDP mechanism
+    is (rho + 2 sqrt(rho ln(1/delta)), delta)-DP. Solving
+        epsilon = rho + 2 sqrt(rho ln(1/delta))
+    for rho (a quadratic in sqrt(rho)) gives
+
+        sqrt(rho) = sqrt(ln(1/delta) + epsilon) - sqrt(ln(1/delta)).
+
+    Since the conversion is an upper bound on epsilon, a mechanism with total
+    zCDP at most this rho is guaranteed to be (epsilon, delta)-DP.
+    """
+    if epsilon <= 0:
+        raise ValueError(f"epsilon must be positive, got {epsilon}")
+    if not (0 < delta < 1):
+        raise ValueError(f"delta must be in (0, 1), got {delta}")
+    ln_inv_delta = np.log(1.0 / delta)
+    return (np.sqrt(ln_inv_delta + epsilon) - np.sqrt(ln_inv_delta)) ** 2
+
+
+def compute_dp_sigmas_zcdp(epsilon, delta, sigma_fraction, count_levels):
+    """Rigorous zCDP budget split for the LSH-tree aggregation.
+
+    The aggregation releases, on unit-norm data (L2 sensitivity 1 throughout):
+      - ONE leaf-centroid sum query. Leaves partition the points, so the whole
+        vector of leaf sums is a single Gaussian mechanism -> rho_centers.
+      - ONE noisy-count histogram PER TREE LEVEL. Within a level the points are
+        partitioned across nodes (parallel composition -> one mechanism per
+        level, sensitivity 1); across the `count_levels` levels the releases
+        compose sequentially. Pass the data-independent upper bound
+        `count_levels = max_depth + 1` (the realized depth is itself private).
+
+    All releases compose additively in zCDP:
+        rho_total = rho_centers + count_levels * rho_per_level.
+    We convert the target (epsilon, delta) to rho_total via
+    `zcdp_rho_from_epsilon` (no delta splitting needed -- zCDP spends delta once
+    at conversion), then split it so that, as in `compute_dp_sigmas`,
+        sigma_count / sigma_centers == sigma_fraction.
+
+    For a sensitivity-1 Gaussian, rho = 1/(2 sigma^2), i.e. sigma = 1/sqrt(2 rho).
+    Writing L = count_levels, f = sigma_fraction, the ratio constraint gives
+        rho_centers      = rho_total / (1 + L / f^2)
+        rho_counts_total = rho_total - rho_centers
+        sigma_centers    = 1 / sqrt(2 rho_centers)
+        sigma_count      = sqrt(L / (2 rho_counts_total))   (per-level sigma)
+
+    Args:
+        epsilon:        total privacy budget for the aggregation.
+        delta:          total delta budget for the aggregation.
+        sigma_fraction: ratio sigma_count / sigma_centers (> 0); larger -> less
+                        center noise (better centroids), noisier counts.
+        count_levels:   number of sequential count releases (tree levels),
+                        i.e. max_depth + 1.
+
+    Returns:
+        sigma_centers: noise std for the leaf-centroid sums (single release).
+        sigma_count:   noise std for each per-level count release.
+    """
+    if sigma_fraction <= 0:
+        raise ValueError(f"sigma_fraction must be positive, got {sigma_fraction}")
+    if count_levels < 1:
+        raise ValueError(f"count_levels must be >= 1, got {count_levels}")
+
+    rho_total = zcdp_rho_from_epsilon(epsilon, delta)
+
+    L = count_levels
+    f = sigma_fraction
+    rho_centers = rho_total / (1.0 + L / f ** 2)
+    rho_counts_total = rho_total - rho_centers
+
+    sigma_centers = 1.0 / np.sqrt(2 * rho_centers)
+    sigma_count = np.sqrt(L / (2 * rho_counts_total))
+
+    return sigma_centers, sigma_count
+
+
 def noisy_cluster_centers_and_counts(values, labels, sigma_centers, sigma_count, seed=42):
     """DP per-orthant centroids and counts from a single noise source.
  
