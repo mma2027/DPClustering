@@ -58,8 +58,7 @@ class Params:
     sigma: float = 0.0 #TODO: To remove later
     sigma_fraction: float = 10.0
     basis_method: str = "dpsgd_pca"
-    basis_epsilon: float = 0.5
-    basis_delta: float = 1e-5
+    basis_epsilon: float = 0.2 #Fraction of privacy for private basis
     basis_clip_norm: float = 1.0
     basis_data_fraction: float = 0.1
 
