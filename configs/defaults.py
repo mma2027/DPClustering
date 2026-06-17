@@ -58,7 +58,7 @@ timing_parameters = {
 acc_parameters = {
     "dps": ["none", "laplace", "gaussiananalytic"],  # Privacy mechanisms
     "methods": ["none", "diagonal_then_frac"],  # Constraint methods
-    "eps_budgets": [0.1, 0.25, 0.5, 0.75, 1],  # Privacy budgets
+    "eps_budgets": [0.5, 1, 2, 4],  # Privacy budgets
     "posts": ["none", "fold"],  # Post-processing methods
     "datasets": accuracy_datasets,  # Datasets to use
 }
