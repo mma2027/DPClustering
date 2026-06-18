@@ -33,9 +33,10 @@ DPRIMES=${DPRIMES:-"2"}                      # basis width / max tree depth
 MIN_COUNT=${MIN_COUNT:-30}                   # LSH pruning threshold
 BASIS=${BASIS:-"random"}                     # SimHash basis (random = no basis round)
 NUM_RUNS=${NUM_RUNS:-10}                      # seeds per config (averaged)
-LOCAL_FOLDER=${LOCAL_FOLDER:-"submission"}        # FastLloyd results
-LSH_FOLDER=${LSH_FOLDER:-"submission_lsh"}        # LSH results (separate!)
-OUT_FOLDER=${OUT_FOLDER:-"timing_compare"}        # comparison plots/CSV
+RESULT_FOLDER=${RESULT_FOLDER:-"submission_timing"}              # parent results folder
+LOCAL_FOLDER=${LOCAL_FOLDER:-"$RESULT_FOLDER/baselines"} # FastLloyd results
+LSH_FOLDER=${LSH_FOLDER:-"$RESULT_FOLDER/lsh"}           # LSH results (separate!)
+OUT_FOLDER=${OUT_FOLDER:-"$RESULT_FOLDER/timing_compare"} # comparison plots/CSV
 MPIRUN_FLAGS=${MPIRUN_FLAGS:-"--oversubscribe"}   # set to "" if not supported
 
 echo "========================================"
