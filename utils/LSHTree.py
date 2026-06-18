@@ -25,8 +25,8 @@ The leaves of the surviving tree partition the data into buckets that can then
 be turned into private cluster centers.
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -75,6 +75,67 @@ def _prefix_seed(base_seed: int, hash_prefix: str) -> int:
     return base_seed + int("1" + hash_prefix, 2)
 
 
+def node_count_noise(base_seed: int, hash_prefix: str, count_sigma: float) -> float:
+    """Gaussian noise added to one node's count (scalar, sensitivity 1).
+
+    Shared by the centralized tree and the federated server so both add the
+    identical, prefix-seeded noise to a node's count.
+    """
+    rng = np.random.RandomState(_prefix_seed(base_seed, hash_prefix))
+    return rng.normal(0, count_sigma)
+
+
+def leaf_sum_noise(base_seed: int, hash_prefix: str, center_sigma: float,
+                   dim: int) -> np.ndarray:
+    """Gaussian noise added to one leaf's sum vector (the centroid numerator).
+
+    Uses ``_prefix_seed + 1`` so it is independent of the count noise for the
+    same node. Shared by the centralized tree and the federated server.
+    """
+    rng = np.random.RandomState(_prefix_seed(base_seed, hash_prefix) + 1)
+    return rng.normal(0, center_sigma, size=dim)
+
+
+def node_prefixes(max_depth: int) -> List[str]:
+    """Canonical ordering of every node prefix up to ``max_depth``.
+
+    Level 0 ("") first, then each level by integer value. Server and clients use
+    this to (de)serialize the per-node count vector to a flat array for broadcast.
+    """
+    out = [""]
+    for L in range(1, max_depth + 1):
+        out.extend(format(v, f"0{L}b") for v in range(1 << L))
+    return out
+
+
+def all_node_counts(leaf_values: np.ndarray) -> Dict[str, float]:
+    """Lift a length-``2^d'`` leaf vector to a ``{prefix: value}`` map over all nodes.
+
+    Leaf id ``i`` corresponds to the ``d'``-bit hash ``format(i, '0{d'}b')`` (bit 0
+    is the most significant), and a node ``prefix`` of length ``L`` aggregates the
+    contiguous block of leaves sharing that prefix. Computed bottom-up by pairwise
+    summation (child "0"=2v, child "1"=2v+1). Works for counts (server lifts the
+    masked leaf histogram) and for masks (clients lift the total leaf mask), so
+    both reconstruct identical per-node values for unmasking.
+    """
+    level = np.asarray(leaf_values, dtype=float)
+    d_prime = int(round(np.log2(len(level))))
+    if (1 << d_prime) != len(level):
+        raise ValueError(f"leaf_values length {len(level)} is not a power of two")
+
+    counts: Dict[str, float] = {}
+    L = d_prime
+    while True:
+        for v in range(len(level)):
+            prefix = format(v, f"0{L}b") if L > 0 else ""
+            counts[prefix] = level[v]
+        if L == 0:
+            break
+        level = level.reshape(-1, 2).sum(axis=1)
+        L -= 1
+    return counts
+
+
 @dataclass
 class LSHTreeNode:
     """A node corresponding to a single hash prefix.
@@ -105,8 +166,8 @@ class LSHTreeNode:
         """Return (and cache) the noisy count of points in this node."""
         if self.private_count is not None:
             return self.private_count
-        rng = np.random.RandomState(_prefix_seed(self.base_seed, self.hash_prefix))
-        self.private_count = len(self.points) + rng.normal(0, self.count_sigma)
+        self.private_count = len(self.points) + node_count_noise(
+            self.base_seed, self.hash_prefix, self.count_sigma)
         return self.private_count
 
     @property
@@ -129,16 +190,73 @@ class LSHTreeNode:
         true count is never released. ``private_count`` is clamped to >= 1 to
         avoid division blow-ups on tiny / negative noisy counts.
         """
-        rng = np.random.RandomState(
-            _prefix_seed(self.base_seed, self.hash_prefix) + 1
-        )
-        noisy_sum = self.points.sum(axis=0) + rng.normal(
-            0, center_sigma, size=self.hasher.dim
-        )
+        noisy_sum = self.points.sum(axis=0) + leaf_sum_noise(
+            self.base_seed, self.hash_prefix, center_sigma, self.hasher.dim)
         return noisy_sum / max(self.private_count, 1.0)
 
     def __repr__(self) -> str:
         return f"{self.private_count:.0f}({self.hash_prefix or 'root'})"
+
+
+# ---------------------------------------------------------------------------
+# Pure pruning logic (no points, no noise) -- the single source of truth for
+# how a (noisy) per-node count map turns into a pruned set of surviving leaves.
+# Used by the centralized LSHTree below and by the federated server/clients,
+# which obtain the per-node counts over the network instead of from local points.
+# ---------------------------------------------------------------------------
+
+def prune_tree(get_count: Callable[[str], float], d_prime: int,
+               min_count_to_branch: float, min_count_in_node: float
+               ) -> Dict[int, List[str]]:
+    """Grow the pruned prefix tree level by level from a per-node count oracle.
+
+    Args:
+        get_count: maps a node's hash-prefix to its (noisy) count. Must be
+            deterministic; it is queried for the root, every surviving node
+            (branch test), and both children of every branched node (keep test).
+        d_prime: maximum tree depth (number of hash bits).
+        min_count_to_branch: only nodes whose count is >= this are expanded.
+        min_count_in_node: a child is kept only if its count is >= this.
+
+    Returns:
+        ``{level: [surviving prefixes]}`` with the root ("") always at level 0,
+        in the same order the centralized tree produces (parent order, "0"<"1").
+    """
+    levels: Dict[int, List[str]] = {0: [""]}
+    level = 0
+    while level < d_prime:
+        nxt: List[str] = []
+        for prefix in levels[level]:
+            if get_count(prefix) >= min_count_to_branch:
+                for ch in ("0", "1"):
+                    child = prefix + ch
+                    if get_count(child) >= min_count_in_node:
+                        nxt.append(child)
+        if not nxt:
+            break
+        level += 1
+        levels[level] = nxt
+    return levels
+
+
+def leaves_of(levels: Dict[int, List[str]]) -> List[str]:
+    """Surviving leaves: nodes with no surviving child one level below."""
+    max_level = max(levels)
+    leaves: List[str] = []
+    for lvl in sorted(levels):
+        parents_below = {p[:-1] for p in levels.get(lvl + 1, [])}
+        for prefix in levels[lvl]:
+            if lvl == max_level or prefix not in parents_below:
+                leaves.append(prefix)
+    return leaves
+
+
+def prune_to_leaves(get_count: Callable[[str], float], d_prime: int,
+                    min_count_to_branch: float, min_count_in_node: float
+                    ) -> List[str]:
+    """Convenience: surviving leaf prefixes for the given per-node count oracle."""
+    return leaves_of(prune_tree(get_count, d_prime,
+                                min_count_to_branch, min_count_in_node))
 
 
 class LSHTree:
@@ -164,37 +282,26 @@ class LSHTree:
         self.min_count_in_node = min_count_in_node
         max_depth = min(max_depth, root.hasher.max_hash_len)
 
-        self.tree: Dict[int, List[LSHTreeNode]] = {0: [root]}
-        level = 0
-        while level < max_depth:
-            next_level = self._next_level(self.tree[level])
-            if not next_level:
-                break
-            level += 1
-            self.tree[level] = next_level
+        # Lazily materialize nodes (splitting parents) as the pruning visits
+        # them, so surviving leaf nodes retain their points for centroids. The
+        # branch/keep/leaf decisions themselves are delegated to the shared pure
+        # helpers so the centralized and federated paths can never diverge.
+        nodes: Dict[str, LSHTreeNode] = {root.hash_prefix: root}
 
-        self.leaves = [
-            node for nodes in self.tree.values()
-            for node in nodes if self._is_leaf(node)
-        ]
+        def get_node(prefix: str) -> LSHTreeNode:
+            if prefix not in nodes:
+                parent = get_node(prefix[:-1])
+                for child in parent.children():
+                    nodes.setdefault(child.hash_prefix, child)
+            return nodes[prefix]
 
-    def _next_level(self, level_nodes: List[LSHTreeNode]) -> List[LSHTreeNode]:
-        """Branch eligible nodes and keep only children above the threshold."""
-        children: List[LSHTreeNode] = []
-        for node in level_nodes:
-            if node.private_count >= self.min_count_to_branch:
-                children.extend(node.children())
-        return [c for c in children if c.private_count >= self.min_count_in_node]
+        levels = prune_tree(lambda p: get_node(p).private_count, max_depth,
+                            min_count_to_branch, min_count_in_node)
 
-    def _is_leaf(self, node: LSHTreeNode) -> bool:
-        """A node is a leaf if no node one level below extends its prefix."""
-        below = node.depth + 1
-        if below > max(self.tree):
-            return True
-        return not any(
-            child.hash_prefix[:-1] == node.hash_prefix
-            for child in self.tree[below]
-        )
+        self.tree: Dict[int, List[LSHTreeNode]] = {
+            lvl: [nodes[p] for p in prefixes] for lvl, prefixes in levels.items()
+        }
+        self.leaves = [nodes[p] for p in leaves_of(levels)]
 
     def private_centers(self, center_sigma: float) -> np.ndarray:
         """Noisy centroid of every leaf bucket: ``(num_leaves, dim)`` array."""

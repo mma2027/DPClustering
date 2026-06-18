@@ -192,7 +192,7 @@ class ExperimentRunner:
         """Get epsilon budgets based on privacy setting."""
         # The LSH protocol always sweeps the eps budgets, since its privacy comes
         # from eps directly rather than from `dp`.
-        is_lsh = self.protocol.__name__ == "lsh_proto"
+        is_lsh = self.protocol.__name__ in ("lsh_proto", "mpi_lsh_proto")
         return [0] if dp == "none" and not is_lsh else self.params_list["eps_budgets"]
 
     def run_experiment(self, params: Params) -> None:
@@ -202,7 +202,7 @@ class ExperimentRunner:
         successful_experiments = experiment_count = 0
 
         # Show current config
-        if self.protocol.__name__ == "lsh_proto":
+        if self.protocol.__name__ in ("lsh_proto", "mpi_lsh_proto"):
             max_depth = params.tree_max_depth or params.d_prime
             config_desc = (f"d_prime={params.d_prime}, max_depth={max_depth}, "
                            f"eps={params.eps}, min_count={params.min_count_in_node}")
@@ -436,6 +436,27 @@ def process_dataset(
         traceback.print_exc()
 
 
+def _configure_lsh(params_list: Dict[str, Any], args: Namespace) -> None:
+    """Apply the LSH-protocol parameter sweep.
+
+    Shared by the timing/MPI path (mpi_lsh_proto) and the centralized path
+    (lsh_proto) so the two stay in sync. Does not touch num_clients or
+    eps_budgets (set by the caller / experiment config).
+    """
+    params_list["tree_max_depth"] = args.tree_max_depth
+    params_list["tree_min_count"] = args.tree_min_count
+    # LSH doesn't use DP/method/post — collapse to single "none" values
+    params_list.update({"dps": ["none"], "methods": ["none"], "posts": ["none"]})
+    if args.d_primes is not None:
+        params_list["d_primes"] = args.d_primes
+    else:
+        params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
+    params_list["basis_methods"] = args.basis_method
+    params_list["basis_epsilons"] = [args.basis_epsilon]
+    params_list["basis_clip_norms"] = [args.basis_clip_norm]
+    params_list["basis_data_fractions"] = [args.basis_data_fraction]
+
+
 def main() -> None:
     """Main entry point for running experiments."""
     args = parse_args()
@@ -463,34 +484,23 @@ def main() -> None:
     # Set up protocol and communication
     if "timing" in exp_type:
         from data_io.comm import comm
-        from utils.protocols import mpi_proto
-        proto = mpi_proto
         with_comm = True
         num_clients = comm.world_size - 1
         params_list["num_clients"] = num_clients
         exp_type = f"timing_{num_clients}"
+        if args.protocol == "lsh":
+            from utils.protocols import mpi_lsh_proto
+            proto = mpi_lsh_proto
+            _configure_lsh(params_list, args)
+        else:
+            from utils.protocols import mpi_proto
+            proto = mpi_proto
     elif args.protocol == "lsh":
         from utils.protocols import lsh_proto
         proto = lsh_proto
         with_comm = False
         params_list["num_clients"] = 2
-        # LSH prefix-tree pruning thresholds
-        params_list["tree_max_depth"] = args.tree_max_depth
-        params_list["tree_min_count"] = args.tree_min_count
-        # lsh doesn't use DP/method/post — collapse to single "none" values
-        params_list.update({
-            "dps": ["none"],
-            "methods": ["none"],
-            "posts": ["none"],
-        })
-        if args.d_primes is not None:
-            params_list["d_primes"] = args.d_primes
-        else:
-            params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
-        params_list["basis_methods"] = args.basis_method
-        params_list["basis_epsilons"] = [args.basis_epsilon]
-        params_list["basis_clip_norms"] = [args.basis_clip_norm]
-        params_list["basis_data_fractions"] = [args.basis_data_fraction]
+        _configure_lsh(params_list, args)
     else:
         from utils.protocols import local_proto
         proto = local_proto
