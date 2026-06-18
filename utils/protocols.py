@@ -172,125 +172,13 @@ def local_proto(value_lists, params: Params, method="masked"):
     return to_fixed(centroids), unassigned_last_iter
 
 
-
-def ortho_proto(value_lists, params: Params, method="masked"):
-    """Protocol adapter for orthogonal projection clustering.
- 
-    Concatenates client data (ortho is not federated), builds an orthonormal
-    basis, partitions points by projection sign patterns, and computes centroids
-    and counts.
- 
-    Privacy accounting (basic sequential composition, all from the single eps):
-        delta         = 1 / (n log n)
-        basis (dpsgd) = (basis_epsilon * eps,        basis_epsilon * delta)
-        aggregation   = ((1 - basis_epsilon) * eps,  (1 - basis_epsilon) * delta)
-                        -> further split into centers/count by sigma_fraction
-                           (and delta_agg equally) inside compute_dp_sigmas.
- 
-    The basis budget is taken ONLY for basis_method == "dpsgd_pca". "random" and
-    "standard_pca" build the basis without touching the data, so the whole
-    (eps, delta) is left for the centroid + count noise. When eps == 0 the
-    aggregation is exact (non-private).
- 
-    `basis_epsilon` is now a FRACTION in (0, 1) of the total budget (not an
-    absolute epsilon); `params.basis_delta` is no longer used.
- 
-    Args:
-        value_lists (list): list of numpy arrays (one per client)
-        params (Params): uses d_prime, seed, eps, basis_method, basis_epsilon,
-            sigma_fraction, basis_clip_norm, basis_data_fraction, data_size, fixed.
-        method (str, optional): unused, kept for protocol interface compatibility.
- 
-    Returns:
-        tuple: (centroids, stats) — stats adds eps_basis / eps_agg to the prior keys.
-    """
-    from utils.ortho_clustering import (
-        orthogonal_basis, ortho_assign,
-        cluster_centers, cluster_counts,
-        noisy_cluster_centers_and_counts,
-        compute_dp_sigmas,
-    )
- 
-    values = np.vstack(value_lists)
-    if params.fixed:
-        values = unscale(values)
- 
-    n = params.data_size
-    delta = 1.0 / (n * np.log(n))
- 
-    # --- split the total budget: only dpsgd_pca pays for the basis ---
-    if params.basis_method == "dpsgd_pca":
-        assert params.eps > 0, "dpsgd_pca basis needs eps > 0 to take a budget fraction"
-        assert 0.0 < params.basis_epsilon < 1.0, \
-            "basis_epsilon must be a fraction in (0, 1) for dpsgd_pca"
-        eps_basis,  delta_basis = params.basis_epsilon * params.eps, params.basis_epsilon * delta
-        eps_agg,    delta_agg   = params.eps - eps_basis, delta - delta_basis
-    else:
-        eps_basis, delta_basis = 0.0, 0.0          # free basis -> whole budget to aggregation
-        eps_agg,   delta_agg   = params.eps, delta
- 
-    basis = orthogonal_basis(
-        values, params.d_prime,
-        method=params.basis_method, seed=params.seed,
-        epsilon=eps_basis, delta=delta_basis,      # absolute budget for DP-SGD-PCA
-        clip_norm=params.basis_clip_norm,
-        data_fraction=params.basis_data_fraction,
-    )
- 
-    labels = ortho_assign(values, params.d_prime, seed=params.seed, basis=basis)
- 
-    true_counts, _ = cluster_counts(labels)  # diagnostics (pre-noise)
- 
-    # --- noise on the leftover (eps_agg, delta_agg); exact when eps == 0 ---
-    # noisy_cluster_centers_and_counts draws both noises from one RNG and
-    # divides the noisy sum by the noisy count, so the count budget does real
-    # work in the centroid and no true count is leaked.
-    if params.eps > 0:
-        sigma_centers, sigma_count = compute_dp_sigmas(eps_agg, delta_agg, params.sigma_fraction)
-        centers, noisy_counts, _ = noisy_cluster_centers_and_counts(
-            values, labels, sigma_centers, sigma_count, seed=params.seed
-        )
-        # TODO: We need a post-process to prune the clusters
-    else:
-        sigma_centers, sigma_count = 0.0, 0.0
-        centers, _ = cluster_centers(values, labels)
- 
-    print(
-        f" Quadrant counts (d'={params.d_prime}, basis={params.basis_method}, "
-        f"eps={params.eps}, delta={delta:.3g}, "
-        f"eps_basis={eps_basis:.3f}, eps_agg={eps_agg:.3f}, "
-        f"sigma_fraction={params.sigma_fraction}, "
-        f"sigma_centers={sigma_centers:.4f}, sigma_count={sigma_count:.4f}): "
-        f"min={true_counts.min()}, max={true_counts.max()}, "
-        f"mean={true_counts.mean():.1f}, std={true_counts.std():.1f}, "
-        f"occupied={len(true_counts)}/{2**params.d_prime}"
-    )
- 
-    if params.fixed:
-        centers = to_fixed(centers)
- 
-    return centers, {
-        "unassigned": 0,
-        "eps_basis": eps_basis,
-        "eps_agg": eps_agg,
-        "sigma_centers": sigma_centers,
-        "sigma_count": sigma_count,
-        "count_min": int(true_counts.min()),
-        "count_max": int(true_counts.max()),
-        "count_mean": float(true_counts.mean()),
-        "count_std": float(true_counts.std()),
-        "occupied_quadrants": len(true_counts),
-    }
-
-
 def lsh_proto(value_lists, params: Params, method="masked"):
     """Protocol adapter for DP LSH prefix-tree clustering.
 
-    Uses the same SimHash basis as ortho_proto, but instead of the full
-    2^d' sign-pattern partition it grows an LSH prefix tree (see LSHTree.py),
-    pruning any branch whose *noisy* point count falls below a threshold. Each
-    surviving leaf yields one (noisy) centroid, so the number of clusters is
-    data-dependent rather than fixed at 2^d'.
+    Hashes points with a SimHash basis (random / SVD-PCA / DP-SGD-PCA, via
+    orthogonal_basis) and grows an LSH prefix tree (see utils/LSHTree.py), pruning any
+    branch whose *noisy* point count falls below a threshold. Each surviving leaf
+    yields one (noisy) centroid, so the number of clusters is data-dependent.
 
     Privacy accounting:
         delta         = 1 / (n log n)
@@ -306,9 +194,9 @@ def lsh_proto(value_lists, params: Params, method="masked"):
                         data-independent bound max_depth + 1, since the realized
                         tree depth is itself privacy-sensitive.
 
-    As in ortho_proto, only basis_method == "dpsgd_pca" spends basis budget;
-    "random"/"svd_pca" leave the whole (eps, delta) for aggregation, and eps == 0
-    means exact (non-private) counts/centroids.
+    Only basis_method == "dpsgd_pca" spends basis budget; "random"/"svd_pca"
+    leave the whole (eps, delta) for aggregation, and eps == 0 means exact
+    (non-private) counts/centroids.
 
     Args:
         value_lists (list): list of numpy arrays (one per client).
@@ -321,7 +209,7 @@ def lsh_proto(value_lists, params: Params, method="masked"):
         tuple: (leaf_centroids, stats).
     """
     from utils.ortho_clustering import orthogonal_basis, compute_dp_sigmas_zcdp
-    from LSHTree import build_lsh_tree
+    from utils.LSHTree import build_lsh_tree
 
     values = np.vstack(value_lists)
     if params.fixed:

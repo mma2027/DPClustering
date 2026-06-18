@@ -1,5 +1,5 @@
 """
-Compare clustering quality across three orthogonal-projection basis methods:
+Compare clustering quality across three LSH (SimHash) basis methods:
   random     — random orthonormal basis (no DP cost, no data-dependent direction)
   svd_pca    — non-private PCA via SVD (oracle: best possible basis, no privacy)
   dpsgd_pca  — DP-SGD PCA (private basis, our method)
@@ -7,8 +7,8 @@ Compare clustering quality across three orthogonal-projection basis methods:
 For each dataset, generates one PDF per metric showing NICV (and other metrics)
 as grouped bars over d' values, one group per basis method.
 
-Assumes all three methods have been run with `--protocol ortho` and their results
-are stored in the same variances_ortho.csv (distinguished by the basis_method column).
+Assumes all three methods have been run with `--protocol lsh` and their results
+are stored in the same variances_lsh.csv (distinguished by the basis_method column).
 
 Usage:
     python -m plots.compare_basis                         # submission/, accuracy
@@ -90,28 +90,28 @@ def _best_dpsgd_row(group):
     return group.iloc[0]
 
 
-def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, eps_filter, out_folder):
+def plot_basis_comparison(lsh_df, local_baselines, metric, dataset, eps_filter, out_folder):
     """Plot grouped bars comparing basis methods across d' values for one metric.
 
     Layout: one bar group per d'.  Within each group: [random, svd_pca, dpsgd_pca].
     Local baselines (Lloyd, FastLloyd) are drawn as horizontal reference lines.
 
     Args:
-        ortho_df: DataFrame from variances_ortho.csv, already filtered to one epsilon
+        lsh_df: DataFrame from variances_lsh.csv, already filtered to one epsilon
         local_baselines: dict from _load_local_baselines
         metric: full metric column name
         dataset: dataset name (for title)
         eps_filter: the epsilon value that was used to filter (for subtitle)
         out_folder: directory to save the PDF
     """
-    if metric not in ortho_df.columns:
+    if metric not in lsh_df.columns:
         return
 
-    basis_methods = [m for m in ["random", "svd_pca", "dpsgd_pca"] if m in ortho_df["basis_method"].values]
+    basis_methods = [m for m in ["random", "svd_pca", "dpsgd_pca"] if m in lsh_df["basis_method"].values]
     if not basis_methods:
         return
 
-    d_primes = sorted(ortho_df["d_prime"].dropna().unique().astype(int))
+    d_primes = sorted(lsh_df["d_prime"].dropna().unique().astype(int))
     if not d_primes:
         return
 
@@ -123,7 +123,7 @@ def plot_basis_comparison(ortho_df, local_baselines, metric, dataset, eps_filter
     fig, ax = plt.subplots(figsize=(max(6, n_groups * n_per_group * 1.0), 5))
 
     for i, basis in enumerate(basis_methods):
-        sub = ortho_df[ortho_df["basis_method"] == basis]
+        sub = lsh_df[lsh_df["basis_method"] == basis]
         vals, errs = [], []
         for d_prime in d_primes:
             rows = sub[sub["d_prime"] == d_prime]
@@ -187,35 +187,35 @@ def process_datasets(results_folder, exp_type, eps_filter):
 
     for dataset in tqdm(datasets, desc="datasets"):
         folder = base / dataset
-        ortho_path = folder / "variances_ortho.csv"
-        if not ortho_path.exists():
+        lsh_path = folder / "variances_lsh.csv"
+        if not lsh_path.exists():
             continue
 
-        ortho_df = pd.read_csv(ortho_path)
-        if "basis_method" not in ortho_df.columns:
-            print(f"  {dataset}: variances_ortho.csv has no basis_method column, skipping")
+        lsh_df = pd.read_csv(lsh_path)
+        if "basis_method" not in lsh_df.columns:
+            print(f"  {dataset}: variances_lsh.csv has no basis_method column, skipping")
             continue
-        if "eps" not in ortho_df.columns:
-            print(f"  {dataset}: variances_ortho.csv has no eps column, skipping")
+        if "eps" not in lsh_df.columns:
+            print(f"  {dataset}: variances_lsh.csv has no eps column, skipping")
             continue
 
         # Filter to one epsilon so the basis comparison is at a fixed privacy
         # budget. Default to the largest eps available (least centroid noise).
-        dataset_eps = eps_filter if eps_filter is not None else ortho_df["eps"].max()
-        ortho_df = ortho_df[np.isclose(ortho_df["eps"].fillna(0.0), dataset_eps)]
+        dataset_eps = eps_filter if eps_filter is not None else lsh_df["eps"].max()
+        lsh_df = lsh_df[np.isclose(lsh_df["eps"].fillna(0.0), dataset_eps)]
 
-        if ortho_df.empty:
+        if lsh_df.empty:
             print(f"  {dataset}: no rows after eps filter, skipping")
             continue
 
         local_baselines = _load_local_baselines(folder / "variances.csv")
 
         for metric in METRICS_DICT:
-            plot_basis_comparison(ortho_df, local_baselines, metric, dataset, dataset_eps, str(folder))
+            plot_basis_comparison(lsh_df, local_baselines, metric, dataset, dataset_eps, str(folder))
 
         # Collect summary: best NICV per basis_method per d'
         nicv = "Normalized Intra-cluster Variance (NICV)"
-        for basis, grp in ortho_df.groupby("basis_method"):
+        for basis, grp in lsh_df.groupby("basis_method"):
             for d_prime, sub in grp.groupby("d_prime"):
                 row = _best_dpsgd_row(sub) if basis == "dpsgd_pca" else sub.iloc[0]
                 summary_rows.append({
@@ -226,8 +226,8 @@ def process_datasets(results_folder, exp_type, eps_filter):
                     **{short: row.get(full, np.nan) for full, short in METRICS_DICT.items()},
                 })
 
-        basis_present = ortho_df["basis_method"].unique().tolist()
-        d_primes = sorted(ortho_df["d_prime"].dropna().unique().astype(int))
+        basis_present = lsh_df["basis_method"].unique().tolist()
+        d_primes = sorted(lsh_df["d_prime"].dropna().unique().astype(int))
         print(f"  {dataset}: basis={basis_present}, d'={d_primes}")
 
     if summary_rows:
@@ -238,7 +238,7 @@ def process_datasets(results_folder, exp_type, eps_filter):
 
 
 def parse_args():
-    parser = ArgumentParser(description="Compare ortho clustering across basis methods")
+    parser = ArgumentParser(description="Compare LSH clustering across basis methods")
     parser.add_argument("results_folder", nargs="?", default="submission",
                         help="root results folder (default: submission)")
     parser.add_argument("--exp_type", default="accuracy",

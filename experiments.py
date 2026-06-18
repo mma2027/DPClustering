@@ -190,10 +190,10 @@ class ExperimentRunner:
 
     def _get_eps_budgets(self, dp: str) -> List[float]:
         """Get epsilon budgets based on privacy setting."""
-        # Projection protocols (ortho, lsh) always sweep the eps budgets, since
-        # their privacy comes from eps directly rather than from `dp`.
-        is_projection = self.protocol.__name__ in ("ortho_proto", "lsh_proto")
-        return [0] if dp == "none" and not is_projection else self.params_list["eps_budgets"]
+        # The LSH protocol always sweeps the eps budgets, since its privacy comes
+        # from eps directly rather than from `dp`.
+        is_lsh = self.protocol.__name__ == "lsh_proto"
+        return [0] if dp == "none" and not is_lsh else self.params_list["eps_budgets"]
 
     def run_experiment(self, params: Params) -> None:
         """Run experiment with given parameters multiple times."""
@@ -202,10 +202,7 @@ class ExperimentRunner:
         successful_experiments = experiment_count = 0
 
         # Show current config
-        proto_name = self.protocol.__name__
-        if proto_name == "ortho_proto":
-            config_desc = f"d_prime={params.d_prime}, clusters=2^{params.d_prime}={2**params.d_prime}"
-        elif proto_name == "lsh_proto":
+        if self.protocol.__name__ == "lsh_proto":
             max_depth = params.tree_max_depth or params.d_prime
             config_desc = (f"d_prime={params.d_prime}, max_depth={max_depth}, "
                            f"eps={params.eps}, min_count={params.min_count_in_node}")
@@ -340,7 +337,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         "--protocol",
         default="local",
-        choices=["local", "ortho", "lsh"],
+        choices=["local", "lsh"],
         help="clustering protocol to use"
     )
     parser.add_argument(
@@ -348,14 +345,14 @@ def parse_args() -> Namespace:
         nargs="+",
         type=int,
         default=None,
-        help="d_prime values to sweep (ortho protocol only)"
+        help="d_prime values to sweep (lsh protocol only)"
     )
     parser.add_argument(
         "--basis_method",
         default=["dpsgd_pca"],
         nargs="+",
         choices=["random", "dpsgd_pca", "svd_pca"],
-        help="basis generation method(s) for ortho protocol (space-separated, e.g. random svd_pca dpsgd_pca)"
+        help="basis generation method(s) for lsh protocol (space-separated, e.g. random svd_pca dpsgd_pca)"
     )
     parser.add_argument(
         "--d_prime",
@@ -472,39 +469,24 @@ def main() -> None:
         num_clients = comm.world_size - 1
         params_list["num_clients"] = num_clients
         exp_type = f"timing_{num_clients}"
-    elif args.protocol in ("ortho", "lsh"):
-        if args.protocol == "ortho":
-            from utils.protocols import ortho_proto
-            proto = ortho_proto
-        else:
-            from utils.protocols import lsh_proto
-            proto = lsh_proto
-            # LSH prefix-tree pruning thresholds (ignored by ortho)
-            params_list["tree_max_depth"] = args.tree_max_depth
-            params_list["tree_min_count"] = args.tree_min_count
+    elif args.protocol == "lsh":
+        from utils.protocols import lsh_proto
+        proto = lsh_proto
         with_comm = False
         params_list["num_clients"] = 2
-        # ortho/lsh don't use DP/method/post — collapse to single "none" values
+        # LSH prefix-tree pruning thresholds
+        params_list["tree_max_depth"] = args.tree_max_depth
+        params_list["tree_min_count"] = args.tree_min_count
+        # lsh doesn't use DP/method/post — collapse to single "none" values
         params_list.update({
             "dps": ["none"],
             "methods": ["none"],
-            # "eps_budgets": [0],
             "posts": ["none"],
         })
-        # if "dpsgd_pca" in args.basis_method:
-        #     if args.d_primes is not None:
-        #         # Why is it only from 1 to 5?
-        #         # params_list["d_primes"] = [max(1, min(5, d)) for d in args.d_prime]
-        #     else:
-        #         params_list["d_primes"] = [1, 2, 3, 4, 5]
         if args.d_primes is not None:
             params_list["d_primes"] = args.d_primes
         else:
             params_list.setdefault("d_primes", [1, 2, 3, 4, 5])
-        # if args.sigma is not None:
-        #     params_list["sigmas"] = args.sigma if args.sigma else [0.0]
-        # else:
-        #     params_list["sigmas"] = [0.0, 0.1, 0.5, 1.0, 5.0]
         params_list["basis_methods"] = args.basis_method
         params_list["basis_epsilons"] = [args.basis_epsilon]
         params_list["basis_clip_norms"] = [args.basis_clip_norm]
