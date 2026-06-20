@@ -69,8 +69,7 @@ def evaluate(centroids, values, gt_centroids, metrics="nicv"):
     ValueError
         If no non-empty clusters are detected in the solution
     """
-    distances = cdist(values, centroids)
-    associations = get_cluster_associations(distances)
+    associations = _assign_nearest(values, centroids)
     non_empty_clusters = np.unique(associations).size
     empty_clusters = centroids.shape[0] - non_empty_clusters
 
@@ -150,24 +149,25 @@ def evaluate(centroids, values, gt_centroids, metrics="nicv"):
     return results
 
 
-def get_cluster_associations(distances):
-    """
-    Assigns each data point to its nearest cluster based on distance matrix.
+def _assign_nearest(values, centroids, mem_budget=256_000_000):
+    """Index of the nearest centroid for each point, in row-chunks.
 
-    Parameters
-    ----------
-    distances : numpy.ndarray
-        Square distance matrix between points and centroids,
-        shape (n_samples, n_clusters)
-
-    Returns
-    -------
-    numpy.ndarray
-        Array of cluster assignments for each point, shape (n_samples,)
-        Each element is the index of the closest centroid to that point
+    Never materializes the full (n_samples, n_centroids) distance matrix (which
+    OOMs when there are many leaf-centroids, e.g. ~5k leaves x 400k points = 16 GB).
+    Uses ||v-c||^2 = ||v||^2 + ||c||^2 - 2 v.c^T and drops the per-row ||v||^2
+    constant (irrelevant for argmin). Peak memory is bounded by `mem_budget`.
     """
-    associations = np.argmin(distances, axis=1)
-    return associations
+    centroids = np.asarray(centroids, dtype=float)
+    n_centroids = centroids.shape[0]
+    c2 = np.einsum("ij,ij->i", centroids, centroids)          # ||c||^2, (n_centroids,)
+    n = values.shape[0]
+    chunk = max(1, int(mem_budget // (8 * max(n_centroids, 1))))
+    assoc = np.empty(n, dtype=np.int64)
+    for s in range(0, n, chunk):
+        v = values[s:s + chunk]
+        d2 = c2[None, :] - 2.0 * (v @ centroids.T)            # (chunk, n_centroids)
+        assoc[s:s + chunk] = np.argmin(d2, axis=1)
+    return assoc
 
 
 def evaluate_NICV(associations, centroids, values):

@@ -5,7 +5,7 @@ import numpy as np
 
 from configs import Params
 from data_io import MOD, to_fixed, unscale
-from utils import distance_matrix_squared
+from utils import distance_matrix_squared, nearest_centroid_sq
 
 
 def clip_distance(new_centroids, old_centroids, max_dist):
@@ -111,20 +111,19 @@ class UnmaskedClient:
                 - np.ndarray: Sum of points per cluster
                 - np.ndarray: Count of points per cluster
         """
-        local_totals = []
-        local_counts = []
-        for cluster in range(self.params.k):
-            indices = self.associations == cluster
-            count = sum(indices)
-            if count > 0:
-                local_total = self.values[indices].sum(axis=0)
-            else:
-                count = 1
-                local_total = old_centroids[cluster]
-            local_counts.append(count)
-            local_totals.append(local_total)
-        local_totals = np.array(local_totals)
-        local_counts = np.array(local_counts, dtype=np.int32)
+        # Vectorized per-cluster sum/count: O(n_local * d), not O(k * n_local)
+        # (the old per-cluster Python loop was ~k*n_local Python ops -- 8e8 at
+        # glove100 k=4000). Assignments == k are "unassigned" (radius constraint)
+        # and excluded. Empty clusters keep their old centroid with count 1.
+        k = self.params.k
+        assoc = self.associations
+        valid = assoc < k
+        local_counts = np.bincount(assoc[valid], minlength=k)[:k].astype(np.int32)
+        local_totals = np.zeros((k, self.values.shape[1]))
+        np.add.at(local_totals, assoc[valid], self.values[valid])
+        empty = local_counts == 0
+        local_totals[empty] = old_centroids[empty]
+        local_counts[empty] = 1
         return local_totals, local_counts
 
     def step(self, params=None):
@@ -142,20 +141,21 @@ class UnmaskedClient:
                 - np.ndarray: Count of points per cluster
                 - int: Number of points not assigned to any cluster
         """
-        squared_distances = distance_matrix_squared(self.values, self.centroids)
-        self.associations = np.argmin(squared_distances, axis=1)
+        # chunked: never materializes the full (n_local, k) matrix, which is
+        # ~6 GB at glove100 n/clients x k=4000 and would OOM-kill the node.
+        self.associations, min_sq_dist = nearest_centroid_sq(self.values, self.centroids)
         if params is not None:
             self.params = params
         if self.params.method != "none":
             squared_max_dist = self.params.max_dist ** 2
-            self.associations[squared_distances.min(axis=1) > squared_max_dist] = params.k
+            self.associations[min_sq_dist > squared_max_dist] = params.k
         local_totals, local_counts = self.local_step(self.centroids)
         if self.params.method != "none":
             # shift the sums to the origin
             local_totals -= self.centroids * np.expand_dims(local_counts, axis=1)
         if self.params.fixed:
             local_totals = to_fixed(local_totals)
-        unassigned_count = sum(self.associations == self.params.k)
+        unassigned_count = int(np.count_nonzero(self.associations == self.params.k))
         return local_totals, local_counts, unassigned_count
 
 

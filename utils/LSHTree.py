@@ -26,44 +26,9 @@ be turned into private cluster centers.
 """
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 import numpy as np
-
-
-class LSHHasher:
-    """SimHash over a fixed basis matrix.
-
-    Args:
-        basis: ``(d, max_hash_len)`` array whose columns are the projection
-               vectors (e.g. an orthonormal basis from
-               ``utils.ortho_clustering.orthogonal_basis``). Column ``j`` defines
-               hash bit ``j``.
-    """
-
-    def __init__(self, basis: np.ndarray):
-        self.basis = np.asarray(basis, dtype=float)
-        self.dim, self.max_hash_len = self.basis.shape
-
-    def group_by_next_hash(self, points: np.ndarray,
-                           hash_prefix: str = "") -> Dict[str, np.ndarray]:
-        """Split ``points`` on the next hash bit after ``hash_prefix``.
-
-        Returns a dict mapping the next hash character ("0" / "1") to the subset
-        of points taking that bit. Mirrors SimHash.group_by_next_hash: "0" for a
-        non-negative projection, "1" for a negative one.
-        """
-        depth = len(hash_prefix)
-        if depth >= self.max_hash_len:
-            raise ValueError(
-                f"Hash prefix {hash_prefix!r} has length >= max hash length "
-                f"({self.max_hash_len})"
-            )
-        projected = points @ self.basis[:, depth]
-        return {
-            "0": points[projected >= 0],
-            "1": points[projected < 0],
-        }
 
 
 def _prefix_seed(base_seed: int, hash_prefix: str) -> int:
@@ -96,102 +61,53 @@ def leaf_sum_noise(base_seed: int, hash_prefix: str, center_sigma: float,
     return rng.normal(0, center_sigma, size=dim)
 
 
-def node_prefixes(max_depth: int) -> List[str]:
-    """Canonical ordering of every node prefix up to ``max_depth``.
+def hash_leaf_ids(X: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    """Full d'-bit SimHash leaf id for every point (vectorized, no Python loop).
 
-    Level 0 ("") first, then each level by integer value. Server and clients use
-    this to (de)serialize the per-node count vector to a flat array for broadcast.
+    Bit ``j`` is 1 when ``x . basis[:, j] < 0``, packed MSB-first so that a prefix
+    of length ``L`` with integer value ``v`` covers the contiguous leaf-id range
+    ``[v << (d'-L), (v+1) << (d'-L))``. Returns an ``(n,)`` int64 array in
+    ``[0, 2^d')``.
     """
-    out = [""]
-    for L in range(1, max_depth + 1):
-        out.extend(format(v, f"0{L}b") for v in range(1 << L))
-    return out
-
-
-def all_node_counts(leaf_values: np.ndarray) -> Dict[str, float]:
-    """Lift a length-``2^d'`` leaf vector to a ``{prefix: value}`` map over all nodes.
-
-    Leaf id ``i`` corresponds to the ``d'``-bit hash ``format(i, '0{d'}b')`` (bit 0
-    is the most significant), and a node ``prefix`` of length ``L`` aggregates the
-    contiguous block of leaves sharing that prefix. Computed bottom-up by pairwise
-    summation (child "0"=2v, child "1"=2v+1). Works for counts (server lifts the
-    masked leaf histogram) and for masks (clients lift the total leaf mask), so
-    both reconstruct identical per-node values for unmasking.
-    """
-    level = np.asarray(leaf_values, dtype=float)
-    d_prime = int(round(np.log2(len(level))))
-    if (1 << d_prime) != len(level):
-        raise ValueError(f"leaf_values length {len(level)} is not a power of two")
-
-    counts: Dict[str, float] = {}
-    L = d_prime
-    while True:
-        for v in range(len(level)):
-            prefix = format(v, f"0{L}b") if L > 0 else ""
-            counts[prefix] = level[v]
-        if L == 0:
-            break
-        level = level.reshape(-1, 2).sum(axis=1)
-        L -= 1
-    return counts
+    X = np.asarray(X, dtype=float)
+    basis = np.asarray(basis, dtype=float)
+    d_prime = basis.shape[1]
+    neg = (X @ basis) < 0                       # (n, d')  bit 1 where projection < 0
+    weights = (1 << np.arange(d_prime - 1, -1, -1)).astype(np.int64)
+    return neg.astype(np.int64) @ weights
 
 
 @dataclass
 class LSHTreeNode:
-    """A node corresponding to a single hash prefix.
+    """A surviving leaf of the LSH tree (only leaves are materialized).
 
     Attributes:
-        hash_prefix: the bit string this node represents ("" for the root).
-        points: the (non-private) points hashing to ``hash_prefix``.
-        hasher: the shared LSHHasher used to generate child splits.
-        count_sigma: std dev of the Gaussian noise added to this node's count.
-                     The count query has L2 sensitivity 1, so for an
-                     (eps, delta)-DP count use ``sqrt(2 ln(1.25/delta)) / eps``.
-        base_seed: base RNG seed; combined with the prefix for the count noise.
-        private_count: noisy count of ``points`` (computed on init if not given).
+        hash_prefix: the bit string this leaf represents ("" for the root).
+        points: the points hashing to ``hash_prefix`` (used for the centroid only).
+        base_seed: base RNG seed; combined with the prefix for the centroid noise.
+        private_count: the noisy count used for pruning (== get_count(prefix)).
+        dim: ambient dimension (centroid noise size).
     """
 
     hash_prefix: str
     points: np.ndarray
-    hasher: LSHHasher
-    count_sigma: float
-    base_seed: int = 0
-    private_count: Optional[float] = None
-
-    def __post_init__(self):
-        if self.private_count is None:
-            self.private_count = self.get_private_count()
-
-    def get_private_count(self) -> float:
-        """Return (and cache) the noisy count of points in this node."""
-        if self.private_count is not None:
-            return self.private_count
-        self.private_count = len(self.points) + node_count_noise(
-            self.base_seed, self.hash_prefix, self.count_sigma)
-        return self.private_count
+    base_seed: int
+    private_count: float
+    dim: int
 
     @property
     def depth(self) -> int:
         return len(self.hash_prefix)
 
-    def children(self) -> List["LSHTreeNode"]:
-        """All children of this node (one per next hash bit), before pruning."""
-        groups = self.hasher.group_by_next_hash(self.points, self.hash_prefix)
-        return [
-            LSHTreeNode(self.hash_prefix + ch, pts, self.hasher,
-                        self.count_sigma, self.base_seed)
-            for ch, pts in groups.items()
-        ]
-
     def private_center(self, center_sigma: float) -> np.ndarray:
-        """Noisy centroid of this node: (sum + N(0, center_sigma^2 I)) / count.
+        """Noisy centroid: (sum + N(0, center_sigma^2 I)) / noisy_count.
 
         Divides the noisy sum by the (already noisy) ``private_count`` so the
-        true count is never released. ``private_count`` is clamped to >= 1 to
-        avoid division blow-ups on tiny / negative noisy counts.
+        true count is never released; the count is clamped to >= 1 to avoid
+        division blow-ups on tiny / negative noisy counts.
         """
         noisy_sum = self.points.sum(axis=0) + leaf_sum_noise(
-            self.base_seed, self.hash_prefix, center_sigma, self.hasher.dim)
+            self.base_seed, self.hash_prefix, center_sigma, self.dim)
         return noisy_sum / max(self.private_count, 1.0)
 
     def __repr__(self) -> str:
@@ -260,55 +176,29 @@ def prune_to_leaves(get_count: Callable[[str], float], d_prime: int,
 
 
 class LSHTree:
-    """LSH prefix tree built level by level, pruning low-count branches.
+    """Container for a pruned LSH tree: surviving leaves + the level structure.
 
-    Args:
-        root: root node (whole dataset, empty prefix). Built via ``build`` below
-              in the typical case.
-        max_depth: maximum tree depth (also bounded by the basis width).
-        min_count_to_branch: only nodes whose noisy count is at least this are
-            expanded into children.
-        min_count_in_node: a child is kept only if its noisy count is at least
-            this; otherwise the branch is pruned.
+    Built by ``build_lsh_tree``. Memory is O(n*d): points are bucketed by their
+    integer leaf id, so no per-node copies are kept across the tree's depth.
 
     Attributes:
-        tree: maps level index -> list of nodes at that level.
-        leaves: nodes with no surviving children.
+        leaves: surviving leaf nodes (each with .points for its centroid).
+        tree:   maps level index -> list of surviving prefixes at that level.
     """
 
-    def __init__(self, root: LSHTreeNode, max_depth: int,
+    def __init__(self, levels: Dict[int, List[str]], leaves: List[LSHTreeNode],
                  min_count_to_branch: float, min_count_in_node: float):
         self.min_count_to_branch = min_count_to_branch
         self.min_count_in_node = min_count_in_node
-        max_depth = min(max_depth, root.hasher.max_hash_len)
-
-        # Lazily materialize nodes (splitting parents) as the pruning visits
-        # them, so surviving leaf nodes retain their points for centroids. The
-        # branch/keep/leaf decisions themselves are delegated to the shared pure
-        # helpers so the centralized and federated paths can never diverge.
-        nodes: Dict[str, LSHTreeNode] = {root.hash_prefix: root}
-
-        def get_node(prefix: str) -> LSHTreeNode:
-            if prefix not in nodes:
-                parent = get_node(prefix[:-1])
-                for child in parent.children():
-                    nodes.setdefault(child.hash_prefix, child)
-            return nodes[prefix]
-
-        levels = prune_tree(lambda p: get_node(p).private_count, max_depth,
-                            min_count_to_branch, min_count_in_node)
-
-        self.tree: Dict[int, List[LSHTreeNode]] = {
-            lvl: [nodes[p] for p in prefixes] for lvl, prefixes in levels.items()
-        }
-        self.leaves = [nodes[p] for p in leaves_of(levels)]
+        self.tree = levels
+        self.leaves = leaves
 
     def private_centers(self, center_sigma: float) -> np.ndarray:
         """Noisy centroid of every leaf bucket: ``(num_leaves, dim)`` array."""
         return np.array([leaf.private_center(center_sigma) for leaf in self.leaves])
 
     def __repr__(self) -> str:
-        per_level = {lvl: len(nodes) for lvl, nodes in self.tree.items()}
+        per_level = {lvl: len(p) for lvl, p in self.tree.items()}
         return (f"LSHTree(levels={per_level}, leaves={len(self.leaves)}, "
                 f"branch>={self.min_count_to_branch}, keep>={self.min_count_in_node})")
 
@@ -316,19 +206,54 @@ class LSHTree:
 def build_lsh_tree(points: np.ndarray, basis: np.ndarray, max_depth: int,
                    min_count_to_branch: float, min_count_in_node: float,
                    count_sigma: float, base_seed: int = 0) -> LSHTree:
-    """Convenience builder: wrap ``basis`` in a hasher and grow the pruned tree.
+    """Grow the pruned LSH tree in O(n*d) memory (leaf-id bucketing, no copies).
+
+    Each point is hashed to an integer leaf id once; node counts come from
+    counting leaf ids in a contiguous range (binary search on the sorted ids),
+    and leaf points are gathered by range -- so unlike a recursive split, the
+    data is never copied once per level. Produces results identical (up to
+    floating-point summation order) to the previous implementation.
 
     Args:
         points: ``(n, d)`` data.
-        basis: ``(d, max_hash_len)`` projection vectors (columns), e.g. the
-               orthonormal basis from ``orthogonal_basis``.
-        max_depth: maximum tree depth.
+        basis: ``(d, max_hash_len)`` projection vectors (columns).
+        max_depth: maximum tree depth (clamped to the basis width).
         min_count_to_branch: noisy-count threshold for expanding a node.
         min_count_in_node: noisy-count threshold for keeping a child branch.
         count_sigma: Gaussian noise std added to every node's count.
         base_seed: base RNG seed for the per-node count noise.
     """
-    hasher = LSHHasher(basis)
-    root = LSHTreeNode("", np.asarray(points, dtype=float), hasher,
-                       count_sigma, base_seed)
-    return LSHTree(root, max_depth, min_count_to_branch, min_count_in_node)
+    X = np.asarray(points, dtype=float)
+    basis = np.asarray(basis, dtype=float)
+    n, dim = X.shape
+    d_prime = basis.shape[1]
+    max_depth = min(max_depth, d_prime)
+
+    leaf_ids = hash_leaf_ids(X, basis)            # (n,) in [0, 2^d')
+    order = np.argsort(leaf_ids, kind="stable")
+    sorted_ids = leaf_ids[order]
+
+    def _range(prefix):
+        L = len(prefix)
+        if L == 0:
+            return 0, 1 << d_prime
+        v = int(prefix, 2)
+        shift = d_prime - L
+        return v << shift, (v + 1) << shift
+
+    def get_count(prefix):
+        lo, hi = _range(prefix)
+        true = int(np.searchsorted(sorted_ids, hi) - np.searchsorted(sorted_ids, lo))
+        return true + node_count_noise(base_seed, prefix, count_sigma)
+
+    levels = prune_tree(get_count, max_depth, min_count_to_branch, min_count_in_node)
+
+    leaves = []
+    for p in leaves_of(levels):
+        lo, hi = _range(p)
+        a = int(np.searchsorted(sorted_ids, lo))
+        b = int(np.searchsorted(sorted_ids, hi))
+        leaves.append(LSHTreeNode(
+            hash_prefix=p, points=X[order[a:b]], base_seed=base_seed,
+            private_count=get_count(p), dim=dim))
+    return LSHTree(levels, leaves, min_count_to_branch, min_count_in_node)

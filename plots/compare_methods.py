@@ -34,8 +34,6 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from configs.defaults import accuracy_datasets
-
 # Standard plotting configuration (matches per_dataset.py)
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42

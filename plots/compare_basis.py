@@ -27,8 +27,6 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from configs.defaults import accuracy_datasets
-
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
 plt.rcParams.update({'font.size': 14})

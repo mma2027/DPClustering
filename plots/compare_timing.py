@@ -3,14 +3,21 @@ Compare federated LSH vs FastLloyd scalability from MPI timing runs.
 
 Reads `timing_<n_clients>/<dataset>/variances_<rank>.csv` produced by
 `experiments.py --exp_type timing` from one or more results folders (e.g.
-`submission/` for FastLloyd and `submission_lsh/` for LSH), and plots total
-wall-time and total communication vs the number of clients, one line per
-protocol. Protocol is read from the CSV `protocol` column, so folders may be
-passed in any order.
+`<root>/baselines` for FastLloyd and `<root>/lsh` for LSH). For each dataset,
+produces one PDF per timing metric laid out as a GRID:
+  - rows    = d' values (basis width / max tree depth)
+  - columns = epsilon (privacy budget)
+  - x-axis  = number of clients (log2: 2, 4, 8, 16, 32, ...)
+  - y-axis  = the timing metric (wall-time, communication bytes, or rounds)
+  - lines   = methods: FastLloyd (baseline, repeated across all d' rows at its
+              epsilon column) plus one line per LSH basis (LSH-Rand/SVD/DP-SGD)
+
+Wall-time depends on the simulated network delay, so it gets one PDF per delay;
+communication bytes and rounds are delay-independent (one PDF each).
 
 Usage:
-    python -m plots.compare_timing submission submission_lsh
-    python -m plots.compare_timing folderA folderB --out timing_compare
+    python -m plots.compare_timing submission_timing/baselines submission_timing/lsh
+    python -m plots.compare_timing folderA folderB --out submission_timing/timing_compare
 """
 
 import os
@@ -26,15 +33,51 @@ import pandas as pd
 
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
-plt.rcParams.update({'font.size': 12})
+plt.rcParams.update({'font.size': 11})
 
-PROTO_LABEL = {"mpi_proto": "FastLloyd", "mpi_lsh_proto": "LSH"}
-PROTO_COLOR = {"FastLloyd": "green", "LSH": "mediumpurple"}
+BASIS_SHORT = {"random": "Rand", "svd_pca": "SVD", "dpsgd_pca": "DP-SGD"}
+
+# Preferred legend / line ordering and colors (match compare_methods.py)
+METHOD_ORDER = ["FastLloyd", "LSH-Rand", "LSH-SVD", "LSH-DP-SGD"]
+COLORS = {
+    "FastLloyd":   "green",
+    "LSH-Rand":    "steelblue",
+    "LSH-SVD":     "seagreen",
+    "LSH-DP-SGD":  "mediumpurple",
+}
+
+# Timing metrics -> (y-axis label, CI column or None, delay-dependent?)
+METRICS = {
+    "elapsed_ms": ("Wall-time (ms)", "elapsed_h_ms", True),
+    "comm_bytes": ("Communication (bytes)", None, False),
+    "rounds":     ("Communication rounds", None, False),
+}
+
+
+def _label_color(label):
+    return COLORS.get(label, "gray")
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+def _load_dataset_dir(ds_dir):
+    """Merge the server CSV (elapsed/rounds) with total comm summed over ranks."""
+    server = pd.read_csv(ds_dir / "variances_0.csv")
+    rank_files = list(ds_dir.glob("variances_*.csv"))
+    allranks = pd.concat([pd.read_csv(f) for f in rank_files], ignore_index=True)
+
+    key = [c for c in ["protocol", "eps", "delay", "d_prime", "basis_method"]
+           if c in server.columns]
+    comm = (allranks.groupby(key, dropna=False)["comm_size"].sum()
+            .reset_index().rename(columns={"comm_size": "comm_bytes"}))
+    return server.merge(comm, on=key, how="left")
 
 
 def collect(folders):
-    """Tidy table: one row per (protocol, n_clients, dataset, delay)."""
-    rows = []
+    """Tidy table: one row per (protocol, n_clients, dataset, delay, eps, d')."""
+    recs = []
     for folder in folders:
         base = Path(folder)
         if not base.is_dir():
@@ -45,54 +88,122 @@ def collect(folders):
                 continue
             n_clients = int(m.group(1))
             for ds in sorted(p for p in tdir.iterdir() if p.is_dir()):
-                server = ds / "variances_0.csv"
-                if not server.exists():
+                if not (ds / "variances_0.csv").exists():
                     continue
-                sdf = pd.read_csv(server)
-                rank_files = list(ds.glob("variances_*.csv"))
-                for delay, g in sdf.groupby("delay"):
-                    proto = g["protocol"].iloc[0]
-                    # total bytes on the wire = sum over all ranks at this delay
-                    total_comm = 0
-                    for f in rank_files:
-                        df = pd.read_csv(f)
-                        total_comm += df[df["delay"] == delay]["comm_size"].sum()
-                    rows.append({
-                        "protocol": PROTO_LABEL.get(proto, proto),
+                df = _load_dataset_dir(ds)
+                for _, row in df.iterrows():
+                    proto = row["protocol"]
+                    if proto == "mpi_proto":
+                        label, d_prime = "FastLloyd", None
+                    elif proto == "mpi_lsh_proto":
+                        b = row.get("basis_method", "")
+                        label = f"LSH-{BASIS_SHORT.get(b, b)}"
+                        d_prime = int(row["d_prime"])
+                    else:
+                        continue
+                    recs.append({
                         "n_clients": n_clients,
                         "dataset": ds.name,
-                        "delay": delay,
-                        "elapsed_ms": g["elapsed"].mean() * 1000,
-                        "elapsed_h_ms": g["elapsed_h"].mean() * 1000,
-                        "rounds": g["num_comm_rounds"].mean(),
-                        "comm_bytes": int(total_comm),
+                        "label": label,
+                        "d_prime": d_prime,
+                        "eps": float(row["eps"]),
+                        "delay": float(row["delay"]),
+                        "elapsed_ms": float(row["elapsed"]) * 1000,
+                        "elapsed_h_ms": float(row.get("elapsed_h", 0)) * 1000,
+                        "comm_bytes": float(row["comm_bytes"]),
+                        "rounds": float(row["num_comm_rounds"]),
                     })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(recs)
 
 
-def _plot(df, dataset, delay, ycol, yerr_col, ylabel, out_path):
-    sub = df[(df.dataset == dataset) & (np.isclose(df.delay, delay))]
-    if sub.empty:
-        return
-    fig, ax = plt.subplots(figsize=(6, 4))
-    for proto, g in sub.groupby("protocol"):
-        g = g.sort_values("n_clients")
-        yerr = g[yerr_col] if yerr_col else None
-        ax.errorbar(g["n_clients"], g[ycol], yerr=yerr, marker="o", capsize=3,
-                    label=proto, color=PROTO_COLOR.get(proto, "gray"), linewidth=1.8)
-    ax.set_xlabel("number of clients")
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"{dataset}  (delay={delay}s)")
-    ax.set_xticks(sorted(sub["n_clients"].unique()))
-    ax.legend()
-    ax.grid(alpha=0.3)
+def _rows_for(g, value_col, ci_col):
+    """List of dicts the grid plotter consumes (one per row of g)."""
+    rows = []
+    for _, r in g.iterrows():
+        d_prime = None if pd.isna(r["d_prime"]) else int(r["d_prime"])
+        rows.append({
+            "label": r["label"], "d_prime": d_prime, "eps": float(r["eps"]),
+            "n_clients": int(r["n_clients"]), "value": float(r[value_col]),
+            "ci": float(r[ci_col]) if ci_col else None,
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Grid plot: rows = d', columns = epsilon, x = #clients, y = metric
+# ---------------------------------------------------------------------------
+
+def _plot_grid(rows, ylabel, d_primes, epss, title, out_path):
+    nrows, ncols = len(d_primes), len(epss)
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(max(4.0, ncols * 3.0), max(3.0, nrows * 2.6)),
+                             squeeze=False, sharex=True, sharey=True)
+    clients = sorted({r["n_clients"] for r in rows})
+
+    for i, d_prime in enumerate(d_primes):
+        for j, eps in enumerate(epss):
+            ax = axes[i][j]
+            # FastLloyd (d_prime is None) is shown in every row at its eps column.
+            cell = [r for r in rows if r["eps"] == eps
+                    and (r["d_prime"] is None or r["d_prime"] == d_prime)]
+
+            methods = []
+            for r in cell:
+                if r["label"] not in methods:
+                    methods.append(r["label"])
+            methods.sort(key=lambda m: METHOD_ORDER.index(m)
+                         if m in METHOD_ORDER else len(METHOD_ORDER))
+
+            for label in methods:
+                series = sorted([r for r in cell if r["label"] == label],
+                                key=lambda r: r["n_clients"])
+                if not series:
+                    continue
+                xs = np.array([r["n_clients"] for r in series], dtype=float)
+                ys = np.array([r["value"] for r in series], dtype=float)
+                es = np.array([r["ci"] or 0 for r in series], dtype=float)
+                is_baseline = series[0]["d_prime"] is None
+                ax.errorbar(xs, ys, yerr=es if np.any(es > 0) else None,
+                            color=_label_color(label),
+                            linestyle="--" if is_baseline else "-",
+                            marker="o", markersize=4, capsize=3, linewidth=1.6,
+                            label=label)
+
+            ax.set_xscale("log", base=2)
+            if clients:
+                ax.set_xticks(clients)
+                ax.set_xticklabels([str(c) for c in clients])
+                ax.minorticks_off()
+            ax.grid(True, alpha=0.3)
+            if i == 0:
+                ax.set_title(f"ε = {eps:g}", fontsize=11)
+            if j == 0:
+                ax.set_ylabel(f"d' = {d_prime}\n{ylabel}", fontsize=10, labelpad=8)
+            if i == nrows - 1:
+                ax.set_xlabel("clients", fontsize=10)
+
+    handles, labels = [], []
+    for ax in axes.flat:
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            if l not in labels:
+                labels.append(l)
+                handles.append(h)
+    if handles:
+        fig.legend(handles, labels, fontsize=9, title="Method",
+                   loc="upper left", bbox_to_anchor=(1.0, 1.0), borderaxespad=0.2)
+
+    fig.suptitle(title, fontsize=13, y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
-    ap = ArgumentParser(description="Compare LSH vs FastLloyd timing/scalability")
+    ap = ArgumentParser(description="Compare LSH vs FastLloyd timing (d' x eps grid, x=clients)")
     ap.add_argument("folders", nargs="+", help="results folders to scan")
     ap.add_argument("--out", default="timing_compare", help="output folder")
     args = ap.parse_args()
@@ -103,22 +214,34 @@ def main():
         return 1
 
     os.makedirs(args.out, exist_ok=True)
-    csv_path = os.path.join(args.out, "timing_compare.csv")
-    df.sort_values(["dataset", "delay", "protocol", "n_clients"]).to_csv(
-        csv_path, index=False)
+    df.sort_values(["dataset", "label", "d_prime", "eps", "n_clients", "delay"]).to_csv(
+        os.path.join(args.out, "timing_compare.csv"), index=False)
 
-    for dataset in df.dataset.unique():
-        for delay in sorted(df.delay.unique()):
-            tag = f"{dataset}_d{delay}"
-            _plot(df, dataset, delay, "elapsed_ms", "elapsed_h_ms",
-                  "wall-time (ms)", os.path.join(args.out, f"time_{tag}.pdf"))
-            _plot(df, dataset, delay, "comm_bytes", None,
-                  "total communication (bytes)",
-                  os.path.join(args.out, f"comm_{tag}.pdf"))
+    for dataset, g in df.groupby("dataset"):
+        d_primes = sorted(int(x) for x in g["d_prime"].dropna().unique())
+        epss = sorted(g["eps"].unique())
+        if not d_primes or not epss:
+            print(f"  {dataset}: missing LSH d' or eps sweep, skipping")
+            continue
+        out_ds = os.path.join(args.out, dataset)
+        os.makedirs(out_ds, exist_ok=True)
 
-    print(f"Wrote {csv_path} and PDFs to {args.out}/\n")
-    print(df.sort_values(["dataset", "delay", "protocol", "n_clients"])
-          .to_string(index=False))
+        for metric, (ylabel, ci_col, delay_dep) in METRICS.items():
+            if delay_dep:
+                for delay, gd in g.groupby("delay"):
+                    _plot_grid(_rows_for(gd, metric, ci_col), ylabel, d_primes, epss,
+                               f"{dataset}  —  {ylabel}  (delay={delay}s)",
+                               os.path.join(out_ds, f"{metric}_delay{delay}.pdf"))
+            else:
+                gd = g[np.isclose(g["delay"], g["delay"].min())]
+                _plot_grid(_rows_for(gd, metric, ci_col), ylabel, d_primes, epss,
+                           f"{dataset}  —  {ylabel}",
+                           os.path.join(out_ds, f"{metric}.pdf"))
+
+        n_clients = sorted(g["n_clients"].unique())
+        print(f"  {dataset}: d'={d_primes}, eps={epss}, clients={n_clients}")
+
+    print(f"\nWrote grid plots + timing_compare.csv to {args.out}/")
     return 0
 
 

@@ -15,6 +15,18 @@ from pathlib import Path
 from timeit import default_timer as timer
 from typing import List, Dict, Any, Generator
 
+# When launched under MPI (one rank per process, oversubscribed onto a single
+# node), each rank's BLAS must stay single-threaded -- otherwise every rank
+# spawns all-core OpenBLAS worker threads and they thrash. This is catastrophic
+# for the DP-SGD basis (a loop of many tiny linear-algebra ops + QRs): on
+# mnist784 (d=784) the W=784xd' matrices cross OpenBLAS's multithread threshold
+# at d'>=15, turning a ~0.4s basis build into 30-60s. Must run BEFORE numpy is
+# imported. Non-MPI runs (accuracy) are untouched and keep multithreaded BLAS.
+if any(v in os.environ for v in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMI_RANK")):
+    for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(_var, "1")
+
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
@@ -22,9 +34,13 @@ import pandas as pd
 from sklearn.cluster import KMeans
 
 from configs import Params, exp_parameter_dict, num_clusters
-from configs.defaults import accuracy_datasets
+from configs.defaults import accuracy_datasets, large_datasets
 from data_io import shuffle_and_split, unscale, load_txt, normalize
 from utils import evaluate, mean_confidence_interval, plot_clusters
+
+# Above this many points, the O(n^2) metrics (silhouette, Dunn) are skipped —
+# they would hang / OOM on large datasets (e.g. mnist784 70k, glove100 400k).
+LARGE_N_EVAL = 20000
 
 
 class ExperimentRunner:
@@ -73,11 +89,26 @@ class ExperimentRunner:
         self.results_df = None
         self.failed_experiments = []
         # TODO: make eval metrics = nicv to save time
-        self.eval_metrics = "all" if exp_type == "accuracy" or dataset in accuracy_datasets else "nicv"
-        # self.eval_metrics = "nicv"
+        if dataset in large_datasets:
+            # Large datasets: NICV only — the full metric suite (esp. O(n^2)
+            # silhouette / Dunn) is infeasible at this scale.
+            self.eval_metrics = "nicv"
+        elif exp_type == "accuracy" or dataset in accuracy_datasets:
+            self.eval_metrics = "all"
+        else:
+            self.eval_metrics = "nicv"
 
-        values_unscaled = unscale(self.values.copy())
-        self.centroids_gt = KMeans(n_clusters=k).fit(values_unscaled).cluster_centers_
+        # Ground-truth KMeans centroids are only needed for the MSE metric.
+        # Computed lazily so timing / NICV-only / large-dataset runs (which never
+        # use MSE) don't pay an expensive full-data KMeans on every MPI rank.
+        self._centroids_gt = None
+
+    def gt_centroids(self):
+        """Lazily compute (and cache) the KMeans ground-truth centroids."""
+        if self._centroids_gt is None:
+            values_unscaled = unscale(self.values.copy())
+            self._centroids_gt = KMeans(n_clusters=self.k).fit(values_unscaled).cluster_centers_
+        return self._centroids_gt
 
     def run_single_protocol(self, params: Params) -> Dict[str, float]:
         """
@@ -101,12 +132,22 @@ class ExperimentRunner:
         # Handle scaling
         values_unscaled = unscale(self.values.copy()) if params.fixed else self.values
         centroids_final = unscale(centroids) if params.fixed else centroids
-        # Evaluate results (skip MSE when centroid counts differ)
+        # Evaluate results. Expand "all" to an explicit list so we can drop:
+        #   - MSE          when centroid counts differ from the ground truth, and
+        #   - silhouette / dunn_index  for large n (both are O(n^2) and would
+        #     hang / OOM on datasets like mnist784 (70k) or glove100 (400k)).
         eval_metrics = self.eval_metrics
-        if centroids_final.shape[0] != self.centroids_gt.shape[0] and eval_metrics == "all":
+        if eval_metrics == "all":
             eval_metrics = ["nicv", "bcss", "empty_clusters", "silhouette",
-                            "davies_bouldin", "calinski_harabasz", "dunn_index"]
-        metrics = evaluate(centroids_final, values_unscaled, self.centroids_gt, eval_metrics)
+                            "davies_bouldin", "calinski_harabasz", "dunn_index", "mse"]
+            if centroids_final.shape[0] != self.k:   # MSE needs matching centroid count
+                eval_metrics.remove("mse")
+            if self.values.shape[0] > LARGE_N_EVAL:
+                eval_metrics = [m for m in eval_metrics
+                                if m not in ("silhouette", "dunn_index")]
+        # only compute the (expensive) ground truth if MSE is actually evaluated
+        gt = self.gt_centroids() if "mse" in eval_metrics else None
+        metrics = evaluate(centroids_final, values_unscaled, gt, eval_metrics)
         metrics["elapsed"] = elapsed_time
         if isinstance(unassigned, dict):
             metrics.update(unassigned)
@@ -317,6 +358,13 @@ def parse_args() -> Namespace:
     parser.add_argument("--plot", action="store_true", help="plot clusters")
     parser.add_argument("--num_runs", default=10, type=int, help="number of runs")
     parser.add_argument(
+        "--eps_budgets",
+        nargs="+",
+        type=float,
+        default=None,
+        help="override the experiment's epsilon budgets (e.g. 0.5 1 2 4)"
+    )
+    parser.add_argument(
         "--method",
         default="diagonal_then_frac",
         choices=["none", "diagonal_then_frac", "stay_frac"],
@@ -480,6 +528,8 @@ def main() -> None:
     if exp_type in exp_parameter_dict:
         params_list.update(exp_parameter_dict[exp_type])
         params_list["datasets"] = args.datasets  # re-apply --datasets after update, since exp_parameter_dict entries override it
+    if args.eps_budgets is not None:
+        params_list["eps_budgets"] = args.eps_budgets  # CLI override of the epsilon sweep
 
     # Set up protocol and communication
     if "timing" in exp_type:

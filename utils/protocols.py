@@ -295,39 +295,22 @@ def lsh_proto(value_lists, params: Params, method="masked"):
 
 
 # ---------------------------------------------------------------------------
-# Federated LSH (MPI): mirrors mpi_proto's server/client + gather/bcast
-# structure so its communication (rounds, bytes, simulated delay) is comparable
-# to FastLloyd. Rank 0 = LshServer (blind), ranks 1..N = LshClient shards.
-# Two-shot aggregation: one count round (tree + pruning) and one sum round
-# (centroids), plus a tiny leaf-set exchange and a basis step.
+# Federated LSH (MPI): scalability counterpart to mpi_proto, sparse + vectorized.
+# Rank 0 = LshServer, ranks 1..N = LshClient shards. Communication uses
+# comm.*_delay so rounds/bytes/simulated-delay accrue as for FastLloyd.
+# Three short rounds, all O(#occupied) / O(#leaves*d) -- never O(2^d'):
+#   1. basis  : gather a subsample, build the basis at the server, broadcast it
+#   2. counts : gather SPARSE local leaf histograms; server adds noise, prunes,
+#               broadcasts the surviving leaf-id ranges
+#   3. sums   : gather per-leaf local sums; server adds noise, forms centroids,
+#               broadcasts them
+# Result is identical (up to float summation order) to the centralized lsh_proto.
 # ---------------------------------------------------------------------------
 
-def _encode_leaves(leaves):
-    """Surviving leaf prefixes -> (L, 2) int array [(depth, value), ...] for the wire."""
-    if not leaves:
-        return np.empty((0, 2), dtype=np.int64)
-    return np.array([[len(p), int(p, 2) if p else 0] for p in leaves], dtype=np.int64)
-
-
-def _decode_leaves(arr):
-    """Inverse of _encode_leaves."""
-    return [format(int(v), f"0{int(L)}b") if L else "" for L, v in np.asarray(arr)]
-
-
 def mpi_lsh_proto(value_lists, params: Params, method="masked"):
-    """MPI federated LSH prefix-tree clustering (scalability counterpart to mpi_proto).
-
-    Rank 0 runs a blind LshServer (only sees masked aggregates, adds DP noise);
-    ranks 1..N run LshClient shards. Communication uses comm.*_delay so the round
-    count, byte count, and simulated delay accrue exactly as for FastLloyd. The
-    result is identical (up to float summation order) to the centralized
-    lsh_proto under the same seed.
-
-    Returns (centroids, stats) on every rank.
-    """
+    """MPI federated LSH prefix-tree clustering. Returns (centroids, stats) on all ranks."""
     from data_io.comm import comm, fail_together
-    from parties import LshServer, LshClient, MaskedLshClient
-    from utils.LSHTree import node_prefixes
+    from parties import LshServer, LshClient
 
     set_seed(params.seed)
     comm.reset_comm_stats()
@@ -338,56 +321,42 @@ def mpi_lsh_proto(value_lists, params: Params, method="masked"):
     if server_process:
         server = fail_together(lambda: LshServer(params), "LSH Server init failure")
     else:
-        ClientCls = MaskedLshClient if method == "masked" else LshClient
         client = fail_together(
-            lambda: ClientCls(comm.rank - 1, value_lists[comm.rank - 1], params),
+            lambda: LshClient(comm.rank - 1, value_lists[comm.rank - 1], params),
             "LSH Client init failure")
 
-    # --- Step 1: basis (built at the server from a pooled subsample) ----------
+    # --- Step 1: basis (built at the server, then broadcast) ------------------
+    # random : no data (seed only); svd_pca : O(d^2) scatter aggregate (no raw
+    # points); dpsgd_pca : small capped subsample.
     if params.basis_method == "random":
-        subsample = None  # no data needed; basis comes from the shared seed
-    else:
+        basis = server.build_basis() if server_process else None
+    elif params.basis_method == "svd_pca":
+        gathered = comm.gather_delay(None if server_process else client.local_moments(), root)
+        moments = (sum(g for g in gathered[1:] if g is not None) if server_process else None)
+        basis = server.build_basis(moments=moments) if server_process else None
+    else:  # dpsgd_pca
         gathered = comm.gather_delay(None if server_process else client.subsample(), root)
         subsample = (np.vstack([g for g in gathered[1:] if g is not None])
                      if server_process else None)
-    basis = server.build_basis(subsample) if server_process else None
+        basis = server.build_basis(subsample=subsample) if server_process else None
     basis = comm.bcast_delay(basis if server_process else None, root)
-    max_depth = min(params.tree_max_depth or params.d_prime, basis.shape[1])
     if not server_process:
         client.set_basis(basis)
 
-    # --- Step 2: count round (tree + pruning) --------------------------------
+    # --- Step 2: count round (sparse) -> server prunes, broadcasts leaf ranges -
     gathered = comm.gather_delay(
-        None if server_process else client.masked_leaf_hist(), root)
-    order = node_prefixes(max_depth)
+        None if server_process else client.local_leaf_hist(), root)
     if server_process:
-        masked_hist = sum(gathered[1:])
-        noisy_nodes = server.noisy_node_counts(masked_hist)
-        node_arr = np.array([noisy_nodes[p] for p in order])
-    node_arr = comm.bcast_delay(node_arr if server_process else None, root)
-    if not server_process:
-        noisy_nodes = {p: node_arr[i] for i, p in enumerate(order)}
-        leaves = client.prune(noisy_nodes, params.min_count_to_branch,
-                              params.min_count_in_node, max_depth)
+        ranges, order = server.aggregate_and_prune([g for g in gathered[1:] if g is not None])
+    ranges = comm.bcast_delay(ranges if server_process else None, root)
 
-    # --- Tiny leaf-set exchange: tell the blind server which leaves to noise --
+    # --- Step 3: sum round (sparse over surviving leaves) -> centroids --------
     gathered = comm.gather_delay(
-        None if server_process else _encode_leaves(leaves), root)
+        None if server_process else client.local_leaf_sums(ranges), root)
     if server_process:
-        leaves = _decode_leaves(next(g for g in gathered[1:] if g is not None))
-
-    # --- Step 3: sum round (centroids) ---------------------------------------
-    gathered = comm.gather_delay(
-        None if server_process else client.masked_leaf_sums(leaves), root)
-    if server_process:
-        masked_sums = sum(gathered[1:])
-        noisy_sums = server.noisy_leaf_sums(masked_sums, leaves)
-    noisy_sums = comm.bcast_delay(noisy_sums if server_process else None, root)
-    if not server_process:
-        centroids = client.finalize(noisy_nodes, noisy_sums, leaves)
-
-    # Share centroids to every rank (incl. the server), like mpi_proto.
-    centroids = comm.bcast(centroids if not server_process else None, root=1)
+        summed_sorted = sum(gathered[1:])
+        centroids = server.centroids(summed_sorted, order)
+    centroids = comm.bcast_delay(centroids if server_process else None, root)
 
     comm.print_comm_stats()
-    return centroids, {"unassigned": 0, "num_leaves": len(leaves)}
+    return centroids, {"unassigned": 0, "num_leaves": len(ranges)}

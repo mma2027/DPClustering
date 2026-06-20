@@ -165,6 +165,62 @@ def prepare_sipu_synthetic(data_dir: Path):
     save_dataset("birch2", birch2_data, data_dir)
 
 
+def prepare_mnist784(data_dir: Path):
+    """Full MNIST: 70,000 samples x 784 features (OpenML).
+
+    Large, dense, high-dimensional — the regime where LSH's dimension-independent
+    DP noise should beat FastLloyd. Saved as `mnist784` (distinct from the small
+    sklearn-digits `mnist`, 1797 x 64). k = 10.
+    """
+    from sklearn.datasets import fetch_openml
+    print("  Fetching mnist_784 from OpenML (~70k x 784, ~15 MB download)...")
+    X, _ = fetch_openml("mnist_784", version=1, return_X_y=True, as_frame=False)
+    save_dataset("mnist784", np.asarray(X, dtype=np.float32), data_dir)
+
+
+def prepare_glove100(data_dir: Path):
+    """GloVe-6B 100d word embeddings: ~400,000 vectors x 100 (Stanford NLP).
+
+    Dense, high-dimensional, cosine-natural — the canonical embedding workload
+    for SimHash/LSH. Saved as `glove100`.
+
+    Source resolution (in order):
+      1. GLOVE_TXT  — path to a pre-downloaded glove.6B.100d.txt (no network)
+      2. GLOVE_URL  — zip to download (default: Stanford glove.6B.zip, ~822 MB)
+    Set GLOVE_MAX_ROWS to cap the number of vectors (default: all).
+    """
+    import io
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    max_rows = int(os.environ.get("GLOVE_MAX_ROWS", "0")) or None
+    glove_txt = os.environ.get("GLOVE_TXT")
+
+    def parse(fobj):
+        vecs = []
+        for i, line in enumerate(fobj):
+            if max_rows and i >= max_rows:
+                break
+            parts = line.rstrip().split(" ")
+            vecs.append([float(x) for x in parts[1:]])   # drop leading word token
+        return np.asarray(vecs, dtype=np.float32)
+
+    if glove_txt and os.path.exists(glove_txt):
+        print(f"  Parsing local GloVe file: {glove_txt}")
+        with open(glove_txt, "r", encoding="utf-8") as f:
+            data = parse(f)
+    else:
+        url = os.environ.get("GLOVE_URL", "https://nlp.stanford.edu/data/glove.6B.zip")
+        print(f"  Downloading GloVe from {url} (~822 MB)...")
+        with tempfile.TemporaryDirectory() as td:
+            zpath = os.path.join(td, "glove.6B.zip")
+            urllib.request.urlretrieve(url, zpath)
+            with zipfile.ZipFile(zpath) as z, z.open("glove.6B.100d.txt") as f:
+                data = parse(io.TextIOWrapper(f, encoding="utf-8"))
+    save_dataset("glove100", data, data_dir)
+
+
 def prepare_timing_datasets(data_dir: Path):
     """Generate synthetic datasets used by timing experiments."""
     from sklearn.datasets import make_blobs
@@ -180,13 +236,35 @@ def prepare_timing_datasets(data_dir: Path):
                 save_dataset(name, data, data_dir)
 
 
+LARGE_BUILDERS = {"mnist784": prepare_mnist784, "glove100": prepare_glove100}
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="Prepare FastLloyd / LSH datasets")
+    ap.add_argument("--large", action="store_true",
+                    help="also prepare the large high-d datasets (mnist784, glove100)")
+    ap.add_argument("--only", nargs="+", default=None, metavar="NAME",
+                    help="prepare ONLY these datasets, e.g. --only mnist784 glove100")
+    args = ap.parse_args()
+
     data_dir = project_root / "data"
     data_dir.mkdir(exist_ok=True)
 
     print("=" * 60)
     print("FastLloyd Dataset Preparation")
     print("=" * 60)
+
+    # --only: build just the requested datasets (currently the large ones) and stop.
+    if args.only:
+        for name in args.only:
+            if name in LARGE_BUILDERS:
+                print(f"\nPreparing {name}...")
+                LARGE_BUILDERS[name](data_dir)
+            else:
+                print(f"  (skipping unknown --only target: {name})")
+        print("\nDone:", data_dir)
+        return
 
     print("\n[1/4] Preparing scikit-learn datasets...")
     prepare_sklearn_datasets(data_dir)
@@ -199,6 +277,11 @@ def main():
 
     print("\n[4/4] Preparing timing experiment datasets...")
     prepare_timing_datasets(data_dir)
+
+    if args.large:
+        print("\n[5/5] Preparing large high-d datasets (mnist784, glove100)...")
+        prepare_mnist784(data_dir)
+        prepare_glove100(data_dir)
 
     print("\n" + "=" * 60)
     print("Done! All datasets saved to:", data_dir)

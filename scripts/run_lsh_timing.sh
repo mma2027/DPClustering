@@ -26,12 +26,13 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT"
 
 # ── Configuration (override via environment) ─────────────────────────────────
-NCLIENTS=${NCLIENTS:-"2 4 8"}                # client counts to sweep
+NCLIENTS=${NCLIENTS:-"2 4 8 16"}          # client counts to sweep (x-axis of the grid)
 # n-scaling: same k,d (=2,2), increasing number of points
-DATASETS=${DATASETS:-"timesynth_2_2_10000 timesynth_2_2_100000"}
-DPRIMES=${DPRIMES:-"2"}                      # basis width / max tree depth
-MIN_COUNT=${MIN_COUNT:-30}                   # LSH pruning threshold
-BASIS=${BASIS:-"random"}                     # SimHash basis (random = no basis round)
+DATASETS=${DATASETS:-"mnist timesynth_2_2_10000 timesynth_2_2_100000"}
+DPRIMES=${DPRIMES:-"5 10 15"}             # basis width / max tree depth (grid rows)
+EPS_BUDGETS=${EPS_BUDGETS:-"0.5 1 2"}      # privacy budgets (grid columns)
+MIN_COUNT=${MIN_COUNT:-20}                   # LSH pruning threshold
+BASIS=${BASIS:-"random svd_pca dpsgd_pca"}   # SimHash bases -> one LSH line each
 NUM_RUNS=${NUM_RUNS:-10}                      # seeds per config (averaged)
 RESULT_FOLDER=${RESULT_FOLDER:-"submission_timing"}              # parent results folder
 LOCAL_FOLDER=${LOCAL_FOLDER:-"$RESULT_FOLDER/baselines"} # FastLloyd results
@@ -43,7 +44,8 @@ echo "========================================"
 echo " LSH vs FastLloyd — scalability (timing)"
 echo " Clients   : $NCLIENTS"
 echo " Datasets  : $DATASETS"
-echo " d'        : $DPRIMES   prune< $MIN_COUNT   basis=$BASIS"
+echo " d'        : $DPRIMES   eps: $EPS_BUDGETS   prune< $MIN_COUNT"
+echo " Bases     : $BASIS"
 echo " FastLloyd -> $LOCAL_FOLDER/   LSH -> $LSH_FOLDER/"
 echo " Started   : $(date)"
 echo "========================================"
@@ -56,6 +58,7 @@ for n in $NCLIENTS; do
     echo "--- FastLloyd ---"
     mpirun $MPIRUN_FLAGS -np "$np" python3 experiments.py \
         --exp_type timing --protocol local \
+        --eps_budgets $EPS_BUDGETS \
         --datasets $DATASETS --num_runs "$NUM_RUNS" \
         --results_folder "$LOCAL_FOLDER"
 
@@ -63,7 +66,7 @@ for n in $NCLIENTS; do
     mpirun $MPIRUN_FLAGS -np "$np" python3 experiments.py \
         --exp_type timing --protocol lsh \
         --basis_method $BASIS --d_primes $DPRIMES \
-        --tree_min_count "$MIN_COUNT" \
+        --eps_budgets $EPS_BUDGETS --tree_min_count "$MIN_COUNT" \
         --datasets $DATASETS --num_runs "$NUM_RUNS" \
         --results_folder "$LSH_FOLDER"
 done

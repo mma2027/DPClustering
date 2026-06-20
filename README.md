@@ -1,19 +1,29 @@
-# FastLloyd: Federated, Accurate, Secure, and Tunable k-Means Clustering with Differential Privacy
+# DP-LSH Clustering: Scalable Federated $k$-Means via SimHash Trees
 
-FastLloyd addresses the challenge of performing $k$-means clustering in a horizontally federated setting while preserving data privacy. Existing methods suffer from either high computational overhead or significantly degrade clustering utility. FastLloyd overcomes these limitations through a novel federated protocol that enhances both the differential privacy mechanism and the secure computation components. 
+This project studies a **differentially private LSH prefix-tree** clustering method and
+its **scalability**. Each point is hashed by a SimHash basis into a prefix tree; small
+branches are pruned under differential privacy and every surviving leaf yields one
+private centroid. It is a *one-pass* alternative to iterative DP $k$-means, designed for
+**large, high-dimensional, dense** data (e.g. embeddings): its DP noise and per-round
+communication are independent of the dimension $d$, so it should scale where iterative
+methods struggle.
 
-A new DP clustering algorithm is introduced, which incorporates a radius constraint on clusters and uses relative updates to improve utility. This algorithm is integrated into a federated setting using a lightweight, secure aggregation protocol (Masked Secure Aggregation - MSA) that leverages the computational DP model. This allows intermediate differentially private updates to be published, significantly reducing the overhead of secure computation by performing expensive operations like assignments and divisions locally. 
-
-FastLloyd significantly outperforms previous work; It achieves up to a five-orders-of-magnitude speed-up in runtime compared to state-of-the-art secure federated $k$-means approaches, while also reducing communication by up to seven orders of magnitude. Furthermore, FastLloyd not only matches the utility of central DP models but improves upon state-of-the-art DP $k$-means algorithms, especially in higher dimensions and for a larger number of clusters, demonstrating up to an 88% reduction in clustering error.
+The code is built on the **FastLloyd** federated DP-clustering framework, which is used
+throughout as the **baseline**. The repository provides both a centralized and an MPI
+(federated) implementation of the LSH method, plus tooling to compare its **accuracy**
+and **scalability** against FastLloyd.
 
 ## Overview
 
-This repository implements the FastLloyd protocol described in the paper "FastLloyd: Federated, Accurate, Secure, and
-Tunable k-Means Clustering with Differential Privacy". FastLloyd addresses the challenging problem of collaborative
-clustering across multiple data owners without compromising privacy, through:
-
-1. A novel differentially private k-means algorithm with radius constraints
-2. A lightweight secure aggregation protocol for federated settings
+- **LSH prefix-tree clustering** — the focus: one-pass SimHash hashing + DP pruning, with
+  a centralized (`lsh_proto`) and a federated MPI (`mpi_lsh_proto`) variant. See
+  [LSH Prefix-Tree Clustering](#lsh-prefix-tree-clustering).
+- **FastLloyd baseline** — the framework this builds on: an iterative, radius-constrained
+  DP $k$-means with a lightweight masked secure-aggregation protocol, run locally
+  (`local_proto`) or over MPI (`mpi_proto`). See the [paper](#citation) for details.
+- **Comparison tooling** — accuracy (clustering quality vs $\varepsilon$) and scalability
+  (communication rounds / bytes / wall-time vs number of clients), with ready-to-run
+  experiment packages in `small/`, `medium/`, and `large/`.
 
 ## Installation
 
@@ -81,18 +91,20 @@ Rscript scripts/generator.R
 │                                                                                                                                                    
 ├── plots/                                                                                                                                           
 │   ├── ablation_plots.py      # Visualization for ablation studies
-│   ├── compare_basis.py       # Compare random / SVD PCA / DP-SGD PCA basis methods
-│   ├── compare_protocols.py   # Compare ortho vs original algorithm results
-│   ├── compare_methods.py     # Compare ortho vs original algorithm results (line charts)
+│   ├── compare_basis.py       # Compare random / SVD PCA / DP-SGD PCA basis methods (LSH)
+│   ├── compare_methods.py     # Accuracy: LSH vs baselines, line charts over epsilon
+│   ├── compare_timing.py      # Scalability: LSH vs baselines (rounds / bytes / wall-time)
 │   ├── per_dataset.py         # Dataset-specific result visualization
 │   ├── scale_heatmap.py  # Heatmap generation for scalability results
 │   ├── synthetic_bar.py  # Bar charts for synthetic dataset results
-│   └── timing_analysis.py # Analysis of timing experiments
+│   └── timing_analysis.py # Analysis of timing experiments (FastLloyd)
 │                                                                                                                                                    
 ├── scripts/
 │   ├── download_data.py                  # Download and prepare datasets from sklearn/UCI
 │   ├── generator.R                       # R script for generating synthetic datasets
 │   ├── setup.sh                          # Extract data archives and create conda environment
+│   ├── run_lsh.sh                        # Accuracy: baselines + LSH (3 bases) + plots
+│   ├── run_lsh_timing.sh                 # Scalability: LSH vs FastLloyd over MPI + plots
 │   ├── run_accuracy_scale_experiments.sh # Run accuracy and scale experiments in parallel
 │   ├── run_timing_experiments.sh         # Run timing experiments with 2/4/8 clients
 │   ├── run_experiments.sh                # Orchestrates accuracy, scale, and timing runs
@@ -100,14 +112,19 @@ Rscript scripts/generator.R
 │   ├── no_setup.sh                       # Run experiments + plots (environment already active)
 │   └── end_to_end.sh                     # Full pipeline: setup → experiments → plots
 │                                                                                                                                                    
+├── parties/lsh_server.py # LSH server: aggregate sparse counts/sums, add noise, prune
+├── parties/lsh_client.py # LSH client shards: local hashing + sparse counts/sums
 ├── utils/                                                                                                                                           
 │   ├── evaluations.py    # Clustering quality evaluation metrics
-│   ├── ortho_clustering.py # Orthogonal projection clustering (basis generation, assignment, centroids)
-│   ├── protocols.py      # Clustering protocols (local, MPI, ortho)
+│   ├── LSHTree.py        # LSH prefix tree: SimHash hashing, pruning, centroids
+│   ├── ortho_clustering.py # SimHash basis generation (random/SVD/DP-SGD PCA) + zCDP noise
+│   ├── protocols.py      # Clustering protocols (local, MPI FastLloyd, LSH, MPI LSH)
 │   └── utils.py          # General utility functions
 │                                                                                                                                                    
 ├── experiments.py        # Main experiment runner
-├── ortho_cluster_test.py # Standalone test for orthogonal projection clustering
+├── test_lshtree.py       # Unit tests: LSH tree + pruning
+├── test_lsh_federated.py # Unit tests: federated LSH == centralized (in-process)
+├── test_mpi_lsh.py       # MPI equivalence test (run via mpirun)
 ├── env.yml               # Conda environment specification
 └── README.md             # Project documentation
 ```
@@ -151,8 +168,9 @@ bash scripts/end_to_end.sh                      # Full pipeline from scratch (se
 The repository includes several visualization tools in the `plots` directory:
 
 - `per_dataset.py`: Creates performance visualizations for individual datasets
-- `compare_protocols.py`: Compares ortho vs original algorithm results (bar charts + summary CSV)
-- `compare_basis.py`: Compares the three ortho basis methods (random, SVD PCA, DP-SGD PCA) across d' values for each dataset
+- `compare_methods.py`: Accuracy comparison — LSH (each basis) vs baselines (Lloyd/FastLloyd) as line charts over epsilon, one subplot per d'
+- `compare_basis.py`: Compares the three LSH basis methods (random, SVD PCA, DP-SGD PCA) across d' values at a fixed epsilon
+- `compare_timing.py`: Scalability comparison — LSH vs FastLloyd wall-time and communication vs number of clients
 - `scale_heatmap.py`: Generates heatmaps to analyze scalability
 - `synthetic_bar.py`: Creates bar plots comparing performance on synthetic datasets
 - `ablation_plots.py`: Creates plots for ablation studies
@@ -169,27 +187,33 @@ python experiments.py --exp_type "test" --datasets "mnist" "adult" --method "dia
 Key parameters include:
 
 - `--exp_type`: Type of experiment to run (accuracy, scale, timing, test)
-- `--protocol`: Clustering protocol to use (`local` for FastLloyd, `ortho` for orthogonal projection)
+- `--protocol`: Clustering protocol (`local` for FastLloyd/baselines, `lsh` for the LSH prefix tree). Under `--exp_type timing` these run over MPI (`mpi_proto` and `mpi_lsh_proto`).
 - `--datasets`: Datasets to use for the experiment
-- `--method`: Maximum distance method to use
-- `--alpha`: Maximum distance parameter
-- `--post`: Post-processing method for centroids
-- `--d_primes`: d' values to sweep when using `--protocol ortho` (default: 1 2 3 4 5)
-- `--sigma_fraction`: ratio of noise for cluster centers over cluster counts (both require privacy)  (default: 10)
-- `--basis_data_fraction`: fraction of data to subsample before DP-SGD PCA (default: 0.1; see [data subsampling](#data-subsampling-for-dp-sgd))
+- `--method`, `--alpha`, `--post`: Baseline (FastLloyd) max-distance method, parameter, and centroid post-processing (ignored by `lsh`)
+- `--d_primes`: d' values to sweep with `--protocol lsh` (basis width / max tree depth; default: 1 2 3 4 5)
+- `--basis_method`: LSH SimHash basis, one or more of `random svd_pca dpsgd_pca` (default: `dpsgd_pca`)
+- `--tree_min_count`: noisy-count pruning threshold for `lsh`; branches below it are pruned (default: 0 = no pruning)
+- `--tree_max_depth`: max LSH tree depth (default: 0 = use `d_prime`)
+- `--basis_epsilon`: fraction in (0,1) of the total ε spent on the DP-SGD-PCA basis (default: 0.5; only `dpsgd_pca` spends basis budget)
+- `--basis_clip_norm`, `--basis_data_fraction`: DP-SGD-PCA gradient clip norm and data subsample fraction (defaults: 1.0, 0.1; see [data subsampling](#data-subsampling-for-dp-sgd))
+- `--num_runs`: random seeds per configuration (averaged; default 10)
 - `--results_folder`: Folder to store results
 
-## Orthogonal Projection Clustering
+The privacy budget ε for `lsh` is **not** a CLI flag: it comes from the experiment's `eps_budgets` (`configs/defaults.py`, e.g. `0.5 1 2 4` for accuracy) and is split between leaf centroids and per-node counts by `sigma_fraction` (a `Params` default of 10).
 
-`utils/ortho_clustering.py` implements a fast clustering method based on orthogonal projections.
+## LSH Prefix-Tree Clustering
 
-**How it works:** Given `n` points in `d` dimensions, the algorithm projects each point onto `d'` orthonormal basis vectors and assigns cluster membership by the sign pattern of the projections, partitioning the space into up to `2^d'` quadrants. Three basis methods are supported:
+`utils/LSHTree.py` (tree + pruning) and `utils/ortho_clustering.py` (basis + noise) implement a one-pass, differentially private clustering method based on locality-sensitive hashing (SimHash), evaluated here as an alternative to the iterative FastLloyd baselines.
+
+**How it works:** each of `n` points in `d` dimensions is hashed bit-by-bit by projecting it onto the columns of a `(d, d')` SimHash basis and taking the sign of each projection (bit `j` = `sign(x · basis[:, j])`). Points are grouped into a **prefix tree**: the root holds everything, and a node at depth `j` splits its points on bit `j`. Every node carries a **noisy** count, and a branch is **pruned** when that noisy count falls below `--tree_min_count`. Each surviving leaf yields one differentially private centroid (`noisy_sum / noisy_count`), so the number of clusters is data-dependent (up to `2^d'`) rather than fixed. Three SimHash basis methods are supported:
 
 | Method | `--basis_method` | Privacy cost | Description |
 |--------|-----------------|-------------|-------------|
-| Random | `random` | None | Random Gaussian matrix orthogonalized via SVD; no data used |
+| Random | `random` | None (no data used) | Random Gaussian matrix orthogonalized via SVD — the canonical angular-LSH basis |
 | SVD PCA | `svd_pca` | None (non-private) | True top-`d'` principal components via standard SVD; oracle baseline |
-| DP-SGD PCA | `dpsgd_pca` | `(basis_epsilon, basis_delta)` | Differentially private PCA via DP-SGD; default method |
+| DP-SGD PCA | `dpsgd_pca` | `basis_epsilon · ε` | Differentially private PCA via DP-SGD; default method |
+
+**Why LSH (vs. FastLloyd) for large, high-dimensional, dense data:** the per-leaf sum and per-node count queries have L2 sensitivity 1 on unit-norm data, so the centroid noise is **independent of `d`** (FastLloyd's scales with `√d`); the count rounds are also `d`-independent in size. Combined with a fixed, small number of communication rounds (vs. one per Lloyd iteration), this makes LSH attractive in the high-`d`/many-cluster regime — at the cost of a coarser, projection-based partition.
 
 ### DP-SGD PCA Basis
 
@@ -219,7 +243,7 @@ Noise calibration (`_find_sigma_autodp`) uses the **Rényi DP (RDP)** framework 
 
 This gives a much tighter bound than naive composition (`T × ε_per_step`) due to the subsampling amplification. The binary search converges in 64 iterations to find the smallest `sigma` satisfying the target `(epsilon, delta)`.
 
-**Privacy budget split:** `basis_epsilon` / `basis_delta` are spent entirely on the basis computation. They are independent of the clustering step's budget (`--eps`).
+**Privacy budget split:** at the CLI, `--basis_epsilon` is a *fraction* in (0,1) of the run's total ε (from `eps_budgets`) spent on the DP-SGD-PCA basis; the remainder goes to the clustering step (leaf sums + node counts). The `epsilon`/`delta` in the table below are the absolute values the underlying `dpsgd_pca_basis` function receives after the split. `random` and `svd_pca` spend no basis budget, so the whole ε is left for clustering.
 
 #### Parameter Reference
 
@@ -245,7 +269,7 @@ To use the full dataset set `--basis_data_fraction 1.0`.
 
 ### SVD Non-Uniqueness and Sign Ambiguity
 
-> **Research note** — this is an important property of any SVD/PCA-based basis that directly affects ortho clustering.
+> **Research note** — this is an important property of any SVD/PCA-based basis that directly affects sign-pattern (SimHash) hashing.
 
 #### The mathematical issue
 
@@ -261,14 +285,7 @@ The same ambiguity appears in DP-SGD PCA: after each QR re-orthonormalization st
 
 #### Why this matters for sign-pattern clustering
 
-The ortho algorithm assigns clusters *entirely* by sign pattern:
-
-```python
-signs = (projections >= 0).astype(int)   # +1 or 0 per basis direction
-labels = signs @ (2 ** np.arange(d_eff)) # → cluster ID in [0, 2^d' - 1]
-```
-
-If one basis vector is negated, every projection onto that direction flips sign, which **moves every data point between two cluster halves**. Two SVD solutions spanning the same subspace can produce completely different labelings.
+LSH assigns each point's hash *entirely* by the sign of its projections (bit `j` = `sign(x · basis[:, j])`), so the prefix — and therefore the leaf — is a pure function of those signs. If one basis vector is negated, every projection onto that direction flips sign, which **moves every data point to the sibling branch** at that level. Two SVD solutions spanning the same subspace can produce completely different trees.
 
 Concretely:
 - Permuting the rows of `X` before calling `np.linalg.svd` does not change the column space of `V`, but the numerical algorithm may converge to a different sign convention.
@@ -290,130 +307,142 @@ Concretely:
 
 ```python
 from utils.ortho_clustering import (
-    orthogonal_basis, svd_pca_basis, dpsgd_pca_basis,
-    orthogonalize_svd, random_orthogonal_basis,
-    ortho_assign, cluster_centers, cluster_counts, noisy_cluster_centers,
-    noisy_cluster_centers_and_counts, compute_dp_sigmas,
+    orthogonal_basis, svd_pca_basis, dpsgd_pca_basis, random_orthogonal_basis,
+    compute_dp_sigmas_zcdp, zcdp_rho_from_epsilon,
 )
+from utils.LSHTree import hash_leaf_ids, build_lsh_tree, prune_to_leaves
+from utils.protocols import lsh_proto, mpi_lsh_proto
 ```
 
-**Basis generation**
+**Basis generation** (`utils/ortho_clustering.py`)
 
-- `orthogonal_basis(X, d_prime, method="dpsgd_pca", seed=42, **kwargs)` — dispatcher returning a `(d, d')` orthonormal basis. `method` is one of `"random"`, `"svd_pca"`, or `"dpsgd_pca"`. For `dpsgd_pca`, pass `epsilon`, `delta`, `clip_norm`, and optionally `data_fraction` as keyword arguments.
-- `svd_pca_basis(X, d_prime)` — non-private PCA: centers `X` and returns the top-`d'` right singular vectors. Oracle baseline; no privacy guarantee.
-- `dpsgd_pca_basis(X, d_prime, epsilon, delta, clip_norm, epochs=10, lr=0.01, batch_size=256, data_fraction=0.1)` — private PCA via DP-SGD. See [DP-SGD PCA Basis](#dp-sgd-pca-basis) for full parameter docs.
-- `random_orthogonal_basis(d, d_prime, seed=42, orthogonalize=None)` — random Gaussian matrix orthogonalized via SVD.
-- `orthogonalize_svd(R)` — orthogonalize a `(d, k)` matrix via economy SVD; used internally.
+- `orthogonal_basis(X, d_prime, method="dpsgd_pca", seed=42, **kwargs)` — dispatcher returning a `(d, d')` orthonormal SimHash basis (columns = projection vectors). `method ∈ {"random", "svd_pca", "dpsgd_pca"}`. For `dpsgd_pca`, pass `epsilon`, `delta`, `clip_norm`, optionally `data_fraction`.
+- `svd_pca_basis(X, d_prime)` — non-private PCA (oracle baseline).
+- `dpsgd_pca_basis(X, d_prime, epsilon, delta, clip_norm, epochs=10, lr=0.01, batch_size=256, data_fraction=0.1)` — private PCA via DP-SGD. See [DP-SGD PCA Basis](#dp-sgd-pca-basis).
+- `random_orthogonal_basis(d, d_prime, seed=42)` — random Gaussian matrix orthogonalized via SVD.
 
-**Assignment and centroids**
+**LSH tree & DP noise** (`utils/LSHTree.py`, `utils/ortho_clustering.py`)
 
-- `ortho_assign(values, d_prime, seed=42, basis=None)` — project `values` onto `basis` (or generate a fresh random basis if `None`) and return integer cluster labels in `[0, 2^d' - 1]` based on the sign pattern of each projection.
-- `cluster_centers(values, labels)` — compute the exact centroid of each cluster. Returns `(centers, unique_labels)`.
-- `cluster_counts(labels)` — return `(counts, unique_labels)` giving the number of points per cluster.
-- `noisy_cluster_centers(values, labels, sigma, seed=42)` — compute centroids with Gaussian noise `N(0, sigma²)` added to each cluster *sum* before dividing by the *true* count. The effective per-dimension noise on the centroid is `sigma / count`. This is the DP mechanism for the sum query alone (the count is not privatized).
-- `compute_dp_sigmas(epsilon, delta, sigma_fraction)` — split a total `(epsilon, delta)` budget between the cluster-sum query and the count query, returning `(sigma_centers, sigma_count)`. The budget is allocated so that `epsilon_centers = sigma_fraction × epsilon_count` (with `delta` split equally), so a larger `sigma_fraction` gives more budget to the centers (lower `sigma_centers`, better centroid utility) at the cost of noisier counts. Uses the Gaussian mechanism `sigma = sqrt(2 ln(1.25/delta_i)) / epsilon_i` with unit-norm data (L2 sensitivity 1).
-- `noisy_cluster_centers_and_counts(values, labels, sigma_centers, sigma_count, seed=42)` — release a noisy sum *and* a noisy count per cluster, then form the centroid as `noisy_sum / noisy_count`. The centroid is pure post-processing of two Gaussian-mechanism releases and never divides by the true count, so it does not leak the exact count. This is the DP centroid mechanism used by the ortho protocol; the two noise levels come from `compute_dp_sigmas`.
+- `hash_leaf_ids(X, basis)` — vectorized: every point's `d'` sign bits packed into one integer leaf id in `[0, 2^d')` (MSB-first, so a length-`L` prefix `v` covers the leaf range `[v << (d'-L), (v+1) << (d'-L))`).
+- `build_lsh_tree(points, basis, max_depth, min_count_to_branch, min_count_in_node, count_sigma, base_seed=0)` — bucket points by leaf id and grow the pruned prefix tree; `tree.private_centers(center_sigma)` returns one noisy centroid per surviving leaf.
+- `prune_to_leaves(get_count, d_prime, min_count_to_branch, min_count_in_node)` — pure pruning: turn a per-node (noisy) count oracle into the surviving-leaf set. Shared by the centralized tree and the federated server so they always agree.
+- `compute_dp_sigmas_zcdp(epsilon, delta, sigma_fraction, count_levels)` — **rigorous zCDP** split of the aggregation budget into `(sigma_centers, sigma_count)`. One leaf-sum release plus `count_levels = max_depth + 1` sequential count releases compose in zCDP; `sigma_count / sigma_centers == sigma_fraction`. Sensitivity 1 on unit-norm data (so noise is dimension-independent).
 
-### Running with the experiment framework
+**Protocols** (`utils/protocols.py`)
 
-The ortho algorithm is integrated as a protocol, so it can be run with any experiment type:
+- `lsh_proto(value_lists, params)` — centralized LSH (used by `--exp_type accuracy`/`scale`).
+- `mpi_lsh_proto(value_lists, params)` — federated LSH over MPI (rank 0 = server, ranks 1..N = client shards), used by `--exp_type timing --protocol lsh`. Produces results identical to `lsh_proto` (up to float summation order) while measuring communication.
+
+### Implementation (centralized and federated)
+
+Both share the exact same math and the same prefix-seeded noise, so they give the
+same result; they differ only in *where* the data lives.
+
+**Centralized — `lsh_proto` → `build_lsh_tree` (`utils/LSHTree.py`).** Single process:
+1. Hash every point to one integer **leaf id** (`hash_leaf_ids`) and sort the ids.
+2. A node's count = how many ids fall in its leaf-id range (a binary search on the
+   sorted ids); add Gaussian count noise (`sigma_count`) and **prune** with
+   `prune_to_leaves`.
+3. For each surviving leaf, centroid = `(sum of its points + Gaussian noise) / noisy_count`.
+
+Memory is **O(n·d)**: points are bucketed by leaf id, never copied once per tree
+level — this is what lets it run at large `n` and high `d'`.
+
+**Federated — `mpi_lsh_proto` → `LshClient` / `LshServer` (`parties/`).** Distributed
+over MPI exactly like FastLloyd (rank 0 = server, ranks 1..N = client shards holding
+the data), in three short rounds:
+1. **Basis** — clients send a small data subsample; the server builds the SimHash
+   basis and broadcasts it.
+2. **Counts** — each client hashes its shard and sends a **sparse** histogram (only
+   its *occupied* leaf ids + counts). The server merges them, adds count noise,
+   prunes, and broadcasts the surviving leaf-id ranges.
+3. **Sums** — each client returns its per-leaf sums (vectorized scatter-add); the
+   server adds the centroid noise, forms the centroids, and broadcasts them.
+
+Communication is **O(occupied leaves)** for counts and **O(leaves·d)** for sums —
+never the dense `2^d'` — and per-rank memory is O(n·d). The server only ever sees
+*aggregated, noisy* counts and sums (the same trust model as FastLloyd's server);
+the DP noise is added by the server before anything is released.
+
+### Testing accuracy vs. baselines
+
+This compares LSH (each basis) against the FastLloyd-family baselines (Lloyd, FastLloyd, …) on clustering-quality metrics across the privacy sweep.
+
+**One command** — run baselines + LSH (all three bases) and generate the plots:
 
 ```bash
-# Accuracy experiments (DP-SGD PCA basis, default settings)
-python experiments.py --exp_type accuracy --protocol ortho
-
-# Scale experiments
-python experiments.py --exp_type scale --protocol ortho
-
-# Custom d' sweep and datasets
-python experiments.py --exp_type accuracy --protocol ortho --d_primes 2 3 4 --datasets iris mnist
-
-# The noisy centroids are calibrated from the experiment's epsilon budget
-# (eps_budgets in configs/defaults.py, e.g. 0.5 1 2 4 for accuracy), split
-# between cluster centers and counts by sigma_fraction (default 10)
-python experiments.py --exp_type accuracy --protocol ortho
-
-# Random basis (no DP for basis computation)
-python experiments.py --exp_type accuracy --protocol ortho --basis_method random --d_primes 1 2 3
-
-# Non-private SVD PCA basis (oracle baseline)
-python experiments.py --exp_type accuracy --protocol ortho --basis_method svd_pca --d_primes 1 2 3 4 5
-
-# DP-SGD PCA basis with custom privacy budget and data fraction
-python experiments.py --exp_type accuracy --protocol ortho \
-    --basis_method dpsgd_pca --d_prime 3 \
-    --basis_epsilon 0.5 --basis_delta 1e-5 --basis_clip_norm 1.0 \
-    --basis_data_fraction 0.1 \
-    --datasets iris mnist --num_runs 5
+bash scripts/run_lsh.sh                 # datasets/bases/d' configured at the top of the script
 ```
 
-When `--protocol ortho` is used, DP/method/post parameters are automatically set to `"none"` (since they don't apply), and `d_prime` is swept over the values given by `--d_primes` (default: 1 2 3 4 5). The DP centroids are calibrated from the experiment's total epsilon budget (`eps_budgets` in `configs/defaults.py`, swept like every other protocol) rather than a directly supplied noise level: `compute_dp_sigmas` splits that budget between the cluster-sum query and the count query according to `sigma_fraction` (default 10), and `noisy_cluster_centers_and_counts` releases a noisy sum and noisy count per cluster. Results are saved to the same CSV format and evaluated with the same metrics as other protocols.
-
-**Basis parameters (ortho protocol only):**
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--basis_method` | `dpsgd_pca` | Basis generation method: `dpsgd_pca` (private PCA via DP-SGD), `svd_pca` (non-private SVD PCA, oracle), or `random` (random orthonormal, no data used) |
-| `--d_prime` | `1 2 3 4 5` | d' value(s) to sweep (space-separated); number of basis vectors and log₂ of max clusters |
-| `--basis_epsilon` | `0.5` | Fraction of privacy budget ε for the DP-SGD basis step |
-| `--basis_clip_norm` | `1.0` | Per-sample gradient clipping norm; bounds sensitivity to `clip_norm` |
-| `--basis_data_fraction` | `0.1` | Fraction of data used for DP-SGD training; reduces noise by cutting the number of SGD steps |
-
-### Running the standalone test
+**Or step by step:**
 
 ```bash
-python ortho_cluster_test.py
+# 1. Baselines (Lloyd / FastLloyd / …) -> variances.csv
+python experiments.py --exp_type accuracy --protocol local --datasets mnist
+
+# 2. LSH with all three bases -> variances_lsh.csv
+python experiments.py --exp_type accuracy --protocol lsh \
+    --basis_method random svd_pca dpsgd_pca \
+    --d_primes 1 2 3 4 5 \
+    --tree_min_count 30 \
+    --basis_epsilon 0.5 --basis_clip_norm 1.0 --basis_data_fraction 0.1 \
+    --datasets mnist --num_runs 10 --results_folder submission
+
+# 3a. Accuracy: LSH vs baselines (line charts over epsilon, one subplot per d')
+python -m plots.compare_methods submission --ignore SuLloyd
+
+# 3b. Basis comparison at a fixed epsilon (grouped bars over d')
+python -m plots.compare_basis submission --eps 1.0
 ```
 
-This runs verification tests followed by benchmarks across the accuracy datasets for `d' = 1..5` with 10 random seeds each, saving results to `ortho_results/results.csv`.
+With `--protocol lsh`, the DP/method/post knobs are forced to `"none"`; `d'` is swept over `--d_primes`; ε is the experiment's `eps_budgets` (e.g. `0.5 1 2 4`); and the centroid/count noise is calibrated per ε via `compute_dp_sigmas_zcdp`. Results use the same CSV format and metrics (NICV, Silhouette, …) as the baselines.
 
-### Comparing protocols
+### Testing scalability vs. baselines
 
-After running both local and ortho experiments, compare results with:
+This compares federated LSH (`mpi_lsh_proto`) against FastLloyd (`mpi_proto`) on **communication rounds, bytes, and wall-time** (with a simulated per-round network delay), sweeping the number of clients and dataset size `n`.
+
+**One command** — sweep clients for both protocols and generate the plots:
 
 ```bash
-# Compare accuracy results (default)
-python -m plots.compare_protocols
-
-# Custom results folder
-python -m plots.compare_protocols my_results
-
-# Compare other experiment types (e.g., scale)
-python -m plots.compare_protocols submission --exp_type scale
+bash scripts/run_lsh_timing.sh          # NCLIENTS / DATASETS / NUM_RUNS / … via env vars
 ```
 
-This generates:
-- **Per-dataset bar charts** (`NICV.pdf`, `Silhouette.pdf`, etc.) in each dataset folder, showing side-by-side metric values with confidence intervals for Lloyd, FastLloyd (best epsilon), and Ortho (each d' value).
-- **Summary CSV** (`submission/accuracy/comparison_summary.csv`) with one row per (dataset, method) and all metric columns, for easy analysis in pandas or a spreadsheet.
+It writes FastLloyd to `$RESULT_FOLDER/baselines/` and LSH to `$RESULT_FOLDER/lsh/` (separate folders — the timing harness names every protocol's per-rank output `variances_<rank>.csv`, so they must not share a folder), then runs `compare_timing` into `$RESULT_FOLDER/timing_compare/`.
 
-### Comparing basis methods
-
-After running the ortho protocol with two or more `--basis_method` values, compare them with:
+**Or step by step** (one client count shown; `-np` = clients + 1 for the server):
 
 ```bash
-# Compare all basis methods found in results (sigma=0 by default)
-python -m plots.compare_basis
+mpirun -np 5 python experiments.py --exp_type timing --protocol local \
+    --datasets timesynth_2_2_10000 timesynth_2_2_100000 \
+    --results_folder submission_timing/baselines
 
-# Custom results folder
-python -m plots.compare_basis my_results
+mpirun -np 5 python experiments.py --exp_type timing --protocol lsh \
+    --basis_method random --d_primes 2 --tree_min_count 30 \
+    --datasets timesynth_2_2_10000 timesynth_2_2_100000 \
+    --results_folder submission_timing/lsh
 
-# Filter to a specific epsilon value
-python -m plots.compare_basis my_results --eps 0.5
+python -m plots.compare_timing submission_timing/baselines submission_timing/lsh \
+    --out submission_timing/timing_compare
 ```
 
-This generates one PDF per metric per dataset (e.g., `basis_compare_NICV.pdf`) showing grouped bars over d' values, with one bar group per basis method. Lloyd and FastLloyd baselines are drawn as horizontal reference lines. A summary CSV (`basis_comparison_summary.csv`) is also written to the experiment folder.
+> Note: under `--exp_type timing`, `--protocol local` selects the MPI baseline `mpi_proto` (FastLloyd over MPI), not the single-process `local_proto`. `compare_timing` emits `time_*.pdf`, `comm_*.pdf`, and `timing_compare.csv` (wall-time and total bytes vs. number of clients, one line per protocol). The `n`-axis is swept by passing `timesynth_<k>_<d>_<n>` datasets of different sizes; `d`-scaling is not yet wired up.
 
 ### Results file layout
 
 ```
 submission/accuracy/<dataset>/
-├── variances.csv                  # Local protocol (Lloyd, FastLloyd, etc.)
-├── variances_ortho.csv            # Ortho protocol results (all basis methods)
-├── NICV.pdf                       # Protocol comparison: NICV
-├── Silhouette.pdf                 # Protocol comparison: Silhouette Score
-├── basis_compare_NICV.pdf         # Basis method comparison: NICV across d'
-├── basis_compare_Silhouette.pdf   # Basis method comparison: Silhouette across d'
-└── ...                            # One chart per metric for each comparison
+├── variances.csv                       # Baselines (Lloyd, FastLloyd, …)
+├── variances_lsh.csv                   # LSH results (all basis methods)
+├── NICV.pdf, Silhouette.pdf, …         # compare_methods: LSH vs baselines per metric
+└── basis_compare_NICV_eps1.0.pdf, …    # compare_basis: bases across d' at fixed eps
+submission/accuracy/
+├── comparison_summary.csv              # compare_methods summary
+└── basis_comparison_summary.csv        # compare_basis summary
+
+submission_timing/                      # scalability (RESULT_FOLDER in run_lsh_timing.sh)
+├── baselines/timing_<n>/<dataset>/variances_<rank>.csv   # FastLloyd (mpi_proto)
+├── lsh/timing_<n>/<dataset>/variances_<rank>.csv         # LSH (mpi_lsh_proto)
+└── timing_compare/                     # time_*.pdf, comm_*.pdf, timing_compare.csv
 ```
 
 ## Citation

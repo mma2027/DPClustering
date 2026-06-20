@@ -31,6 +31,11 @@ g2 = [file.replace(".txt", "") for file in os.listdir("data") if file.startswith
 # Real-world benchmark datasets
 accuracy_datasets = ["iris", "s1", "house", "adult", "lsun", "birch2", "wine", "yeast", "breast", "mnist"]
 
+# Large, dense, high-dimensional datasets (opt-in via download_data.py --large).
+# Accuracy on these is evaluated with NICV only — the other metrics (especially
+# the O(n^2) silhouette / Dunn) are infeasible at this scale.
+large_datasets = ["mnist784", "glove100"]
+
 # Datasets for timing experiments
 timing_datasets = [
                       "s1", "lsun"  # Real datasets
@@ -95,6 +100,13 @@ num_clusters = {
     "yeast": 10,
     "breast": 2,
     "mnist": 10,
+    # Large, dense, high-dimensional (LSH-favorable; opt-in via download_data.py --large).
+    # k is set large -- comparable to the number of leaves the LSH tree produces
+    # over its d' sweep (mnist784: ~32-662, glove100: ~256-4616 at min_count=50) --
+    # so FastLloyd is exercised in the large-k regime. FastLloyd's compute/comm
+    # grow linearly in k; LSH's are k-independent, so this is where LSH should win.
+    "mnist784": 500,    # full MNIST, 70k x 784   (LSH leaves up to ~662)
+    "glove100": 4000,   # GloVe-6B-100d, ~400k x 100 (LSH leaves up to ~4616)
 }
 
 num_clusters.update({
