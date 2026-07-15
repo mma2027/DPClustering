@@ -183,7 +183,11 @@ def lsh_proto(value_lists, params: Params, method="masked"):
     Privacy accounting:
         delta         = 1 / (n log n)
         basis (dpsgd) = (basis_epsilon * eps, basis_epsilon * delta), composed
-                        with the aggregation by basic composition on eps.
+                        with the aggregation by basic composition on eps. The basis
+                        noise is calibrated w.r.t. the FULL dataset via amplification
+                        by Poisson sub-sampling (rate gamma, capped at
+                        BASIS_MAX_SUBSAMPLE) -- the SAME mechanism as the federated
+                        LshServer, so accuracy and timing measure one mechanism.
         aggregation   = ((1 - basis_epsilon) * eps, (1 - basis_epsilon) * delta),
                         accounted RIGOROUSLY in zero-concentrated DP (zCDP) via
                         compute_dp_sigmas_zcdp. The aggregation is one leaf-sum
@@ -208,12 +212,17 @@ def lsh_proto(value_lists, params: Params, method="masked"):
     Returns:
         tuple: (leaf_centroids, stats).
     """
-    from utils.ortho_clustering import orthogonal_basis, compute_dp_sigmas_zcdp
+    from utils.ortho_clustering import (
+        orthogonal_basis, compute_dp_sigmas_zcdp, dpsgd_calibrate_sigma)
     from utils.LSHTree import build_lsh_tree
+    from parties.lsh_client import poisson_subsample, basis_calib_size
 
-    values = np.vstack(value_lists)
-    if params.fixed:
-        values = unscale(values)
+    # Per-shard unscaled views (matching the MPI clients, which each unscale their
+    # own shard). unscale is elementwise, so vstack(unscale(shard)) == unscale(vstack),
+    # and keeping the shards lets dpsgd_pca pool the SAME per-shard Poisson sub-sample.
+    shards = [unscale(v) if params.fixed else np.asarray(v, dtype=float)
+              for v in value_lists]
+    values = np.vstack(shards) if shards else np.empty((0, params.dim))
 
     n = params.data_size
     delta = 1.0 / (n * np.log(n))
@@ -229,13 +238,36 @@ def lsh_proto(value_lists, params: Params, method="masked"):
         eps_basis, delta_basis = 0.0, 0.0
         eps_agg,   delta_agg   = params.eps, delta
 
-    basis = orthogonal_basis(
-        values, params.d_prime,
-        method=params.basis_method, seed=params.seed,
-        epsilon=eps_basis, delta=delta_basis,
-        clip_norm=params.basis_clip_norm,
-        data_fraction=params.basis_data_fraction,
-    )
+    # Build the SimHash basis. dpsgd_pca uses the IDENTICAL mechanism as the federated
+    # LshServer: pool a per-shard Poisson sub-sample (rate gamma, capped at
+    # BASIS_MAX_SUBSAMPLE) and calibrate the basis noise w.r.t. the FULL dataset via
+    # amplification by sub-sampling (full_n = data_size). This keeps the accuracy
+    # (lsh_proto) and timing (mpi_lsh_proto) paths the same mechanism. random/svd_pca
+    # ignore the sub-sample (random uses only the shape; svd_pca uses the full data).
+    if params.basis_method == "dpsgd_pca":
+        subsample = (np.vstack([poisson_subsample(s, i, params) for i, s in enumerate(shards)])
+                     if shards else values)
+        # Calibrate at the DETERMINISTIC public pool size (same as the federated LshServer),
+        # so both paths realize the identical, data-independent mechanism and the memoized
+        # calibration is reused across seeds. The SGD runs on the realized subsample.
+        sigma, _ = dpsgd_calibrate_sigma(
+            eps_basis, delta_basis, basis_calib_size(params), 256, params.basis_epochs,
+            full_n=params.data_size)
+        basis = orthogonal_basis(
+            subsample, params.d_prime,
+            method="dpsgd_pca", seed=params.seed,
+            epsilon=eps_basis, delta=delta_basis,
+            clip_norm=params.basis_clip_norm,
+            epochs=params.basis_epochs, lr=params.basis_lr,
+            data_fraction=1.0, full_n=params.data_size, sigma=sigma,
+        )
+    else:
+        basis = orthogonal_basis(
+            values, params.d_prime,
+            method=params.basis_method, seed=params.seed,
+            epsilon=eps_basis, delta=delta_basis,
+            clip_norm=params.basis_clip_norm,
+        )
 
     # Worst-case tree depth (the tree can't go deeper than the basis is wide).
     max_depth = min(params.tree_max_depth or params.d_prime, basis.shape[1])
@@ -308,7 +340,17 @@ def lsh_proto(value_lists, params: Params, method="masked"):
 # ---------------------------------------------------------------------------
 
 def mpi_lsh_proto(value_lists, params: Params, method="masked"):
-    """MPI federated LSH prefix-tree clustering. Returns (centroids, stats) on all ranks."""
+    """MPI federated LSH prefix-tree clustering. Returns (centroids, stats) on all ranks.
+
+    Timing is reported in three separate parts (all wall-clock, on the server/rank-0 which
+    is what the timing plots read) so the basis and the clustering can be compared apart:
+      - basis_calib_ms : autodp sigma calibration (dpsgd only; 0 otherwise). Data-independent
+                         and precomputable -- a one-time setup constant, not a per-round cost.
+      - basis_build_ms : basis construction (dpsgd SGD loop / svd eigh / random draw) + the
+                         basis communication round.
+      - cluster_ms     : the count + sum rounds (the LSH clustering itself).
+    """
+    from time import perf_counter
     from data_io.comm import comm, fail_together
     from parties import LshServer, LshClient
 
@@ -344,6 +386,7 @@ def mpi_lsh_proto(value_lists, params: Params, method="masked"):
         client.set_basis(basis)
 
     # --- Step 2: count round (sparse) -> server prunes, broadcasts leaf ranges -
+    t_cluster0 = perf_counter()
     gathered = comm.gather_delay(
         None if server_process else client.local_leaf_hist(), root)
     if server_process:
@@ -357,6 +400,24 @@ def mpi_lsh_proto(value_lists, params: Params, method="masked"):
         summed_sorted = sum(gathered[1:])
         centroids = server.centroids(summed_sorted, order)
     centroids = comm.bcast_delay(centroids if server_process else None, root)
+    t_cluster = perf_counter() - t_cluster0
+
+    # Fine-grained basis split lives on the server (only rank 0 builds the basis; clients
+    # block in the collectives, so their basis-phase wall-time ~ the server's). The timing
+    # plots read rank 0, so report the server's calibration / build split there. Both are
+    # measured directly (not derived from the phase wall-time), so they are consistent
+    # across the network-delay sweep -- calibration is memoized, construction is re-timed.
+    # The basis *communication* round is not double-counted here; it is captured by the
+    # comm_bytes / rounds metrics. cluster_ms carries the count+sum comm rounds, so it is
+    # (correctly) network-delay dependent.
+    t_calib = server.t_basis_calib if server_process else 0.0
+    t_build = server.t_basis_build if server_process else 0.0
 
     comm.print_comm_stats()
-    return centroids, {"unassigned": 0, "num_leaves": len(ranges)}
+    return centroids, {
+        "unassigned": 0,
+        "num_leaves": len(ranges),
+        "basis_calib_ms": t_calib * 1000.0,
+        "basis_build_ms": t_build * 1000.0,
+        "cluster_ms": t_cluster * 1000.0,
+    }
