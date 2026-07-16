@@ -3,6 +3,7 @@ Experiments runner for multiparty DP clustering.
 Handles experiment configuration, execution, and result collection.
 """
 
+import hashlib
 import itertools
 import json
 import os
@@ -35,7 +36,7 @@ from sklearn.cluster import KMeans
 
 from configs import Params, exp_parameter_dict, num_clusters
 from configs.defaults import accuracy_datasets, large_datasets
-from data_io import shuffle_and_split, unscale, load_txt, normalize
+from data_io import shuffle_and_split, unscale, load_txt, txt_shape, ensure_unit_norm, to_fixed
 from utils import evaluate, mean_confidence_interval, plot_clusters
 
 # Above this many points, the O(n^2) metrics (silhouette, Dunn) are skipped —
@@ -56,7 +57,8 @@ class ExperimentRunner:
             exp_type: str,
             results_folder: str,
             plot: bool = False,
-            with_comm: bool = False
+            with_comm: bool = False,
+            export_centroids: bool = False
     ):
         """
         Initialize the experiment runner.
@@ -71,6 +73,9 @@ class ExperimentRunner:
             results_folder: Output directory for results
             plot: Whether to generate plots
             with_comm: Whether to use communication metrics
+            export_centroids: Whether to dump the final centroids of every run to
+                disk (see _export_centroids). Lets new point-to-centroid metrics
+                (e.g. cosine similarity) be recomputed later without re-running.
         """
         self.results_folder = results_folder
         self.protocol = protocol
@@ -79,6 +84,7 @@ class ExperimentRunner:
         self.dataset = dataset
         self.plot = plot
         self.with_comm = with_comm
+        self.export_centroids = export_centroids
         self.comm = None
         if with_comm:
             from data_io.comm import comm
@@ -90,9 +96,11 @@ class ExperimentRunner:
         self.failed_experiments = []
         # TODO: make eval metrics = nicv to save time
         if dataset in large_datasets:
-            # Large datasets: NICV only — the full metric suite (esp. O(n^2)
-            # silhouette / Dunn) is infeasible at this scale.
-            self.eval_metrics = "nicv"
+            # Large datasets: NICV plus mean cosine similarity — the rest of the
+            # suite (esp. O(n^2) silhouette / Dunn) is infeasible at this scale,
+            # but cosine similarity is O(n*d) and memory-lean (chunked), so it is
+            # cheap enough to compute alongside NICV.
+            self.eval_metrics = ["nicv", "cosine_similarity"]
         elif exp_type == "accuracy" or dataset in accuracy_datasets:
             self.eval_metrics = "all"
         else:
@@ -120,18 +128,37 @@ class ExperimentRunner:
         Returns:
             Dictionary of evaluation metrics
         """
-        # Prepare data
+        # Prepare data. The MPI server rank holds no data (see process_dataset), so it
+        # skips the shard split and the (data-dependent) evaluation below; it still runs
+        # the protocol and reports the timing (elapsed + phase stats read by the plots).
+        server_rank = self.comm is not None and self.comm.rank == self.comm.root
         proportions = np.ones(params.num_clients) / params.num_clients
-        value_lists = shuffle_and_split(self.values, params.num_clients, proportions)
+        value_lists = ([None] * params.num_clients if server_rank
+                       else shuffle_and_split(self.values, params.num_clients, proportions))
 
         # Run protocol and time it
         start = timer()
         centroids, unassigned = self.protocol(value_lists, params)
         elapsed_time = timer() - start
 
+        if server_rank:
+            # No data on the server -> no NICV; keep wall-time + protocol phase stats.
+            metrics = {"elapsed": elapsed_time}
+            if isinstance(unassigned, dict):
+                metrics.update(unassigned)
+            else:
+                metrics["unassigned"] = unassigned
+            return metrics
+
         # Handle scaling
         values_unscaled = unscale(self.values.copy()) if params.fixed else self.values
         centroids_final = unscale(centroids) if params.fixed else centroids
+
+        # Optionally persist the final centroids so future point-to-centroid
+        # metrics can be recomputed offline (see _export_centroids).
+        if self.export_centroids:
+            self._export_centroids(centroids_final, params)
+
         # Evaluate results. Expand "all" to an explicit list so we can drop:
         #   - MSE          when centroid counts differ from the ground truth, and
         #   - silhouette / dunn_index  for large n (both are O(n^2) and would
@@ -139,7 +166,8 @@ class ExperimentRunner:
         eval_metrics = self.eval_metrics
         if eval_metrics == "all":
             eval_metrics = ["nicv", "bcss", "empty_clusters", "silhouette",
-                            "davies_bouldin", "calinski_harabasz", "dunn_index", "mse"]
+                            "davies_bouldin", "calinski_harabasz", "dunn_index", "mse",
+                            "cosine_similarity"]
             if centroids_final.shape[0] != self.k:   # MSE needs matching centroid count
                 eval_metrics.remove("mse")
             if self.values.shape[0] > LARGE_N_EVAL:
@@ -175,6 +203,54 @@ class ExperimentRunner:
         plt.savefig(folder / f"{filename}.png")
         plt.close()
 
+    def _export_centroids(self, centroids: np.ndarray, params: Params) -> None:
+        """Persist the final centroids of a single run to disk.
+
+        Enabled by --export_centroids. Writes, under
+
+            <results_folder>/<exp_type>/<dataset>/centroids/
+
+        one ``.npy`` per run holding the (n_clusters, dim) final centroid array,
+        alongside a same-stem ``.json`` sidecar recording the full parameter set
+        (protocol, basis, d', eps, seed, ...). Both share a stem of the form
+
+            <protocol>_<basis>_d<d'>_eps<eps>_seed<seed>_<hash8>
+
+        where ``hash8`` is a short digest of the complete parameter set, so the
+        stem is unique even when two configs share the human-readable fields.
+
+        Why: the centroids are otherwise computed in memory and discarded after
+        evaluation, so adding a new point-to-centroid metric (e.g. cosine
+        similarity) requires re-running the whole sweep. With the centroids
+        saved, any such metric can be recomputed offline by loading the dataset
+        (data/<dataset>.txt, unit-normed the same way) and the ``.npy``, then
+        calling utils.evaluate — no clustering re-run needed.
+
+        In an MPI run the global centroids are identical across client ranks, so
+        only the first client rank (root + 1) writes; the server rank never
+        reaches this method (it returns early, holding no data).
+        """
+        if self.with_comm and self.comm.rank != self.comm.root + 1:
+            return
+
+        folder = Path(self.results_folder) / self.exp_type / self.dataset / "centroids"
+        folder.mkdir(parents=True, exist_ok=True)
+
+        meta = {attr: getattr(params, attr) for attr in vars(params)}
+        meta.pop("attributes", None)
+        meta["protocol"] = self.protocol.__name__
+        meta["dataset"] = self.dataset
+
+        digest = hashlib.md5(
+            json.dumps(meta, sort_keys=True, default=str).encode()
+        ).hexdigest()[:8]
+        stem = (f"{self.protocol.__name__}_{params.basis_method}_"
+                f"d{params.d_prime}_eps{params.eps}_seed{params.seed}_{digest}")
+
+        np.save(folder / f"{stem}.npy", np.asarray(centroids))
+        with open(folder / f"{stem}.json", "w") as f:
+            json.dump(meta, f, default=str, indent=2)
+
     def _get_parameter_combinations(self) -> Generator[Params, None, None]:
         """Generate all parameter combinations for experiments."""
         params_order = ["methods", "posts", "delays", "dps"]
@@ -186,9 +262,10 @@ class ExperimentRunner:
         tree_min_count = self.params_list.get("tree_min_count", 0.0)
         basis_methods = self.params_list.get("basis_methods", ["random"])
         basis_epsilons = self.params_list.get("basis_epsilons", [0.0])
-        basis_deltas = self.params_list.get("basis_deltas", [1e-5])
         basis_clip_norms = self.params_list.get("basis_clip_norms", [1.0])
         basis_data_fractions = self.params_list.get("basis_data_fractions", [0.1])
+        basis_lr = self.params_list.get("basis_lr", 0.1)              # scalar (not swept)
+        basis_epochs = self.params_list.get("basis_epochs", 10)       # scalar (not swept)
 
         for method, post, delay, dp in itertools.product(
                 *[self.params_list[key] for key in params_order]
@@ -196,8 +273,8 @@ class ExperimentRunner:
             for eps_budget in self._get_eps_budgets(dp):
                 for d_prime in d_primes:
                     for sigma_fraction in sigma_fractions:
-                        for basis_method, basis_epsilon, basis_delta, basis_clip_norm, basis_data_fraction in itertools.product(
-                                basis_methods, basis_epsilons, basis_deltas, basis_clip_norms, basis_data_fractions
+                        for basis_method, basis_epsilon, basis_clip_norm, basis_data_fraction in itertools.product(
+                                basis_methods, basis_epsilons, basis_clip_norms, basis_data_fractions
                         ):
                             params = Params(
                                 num_clients=self.params_list["num_clients"],
@@ -220,6 +297,8 @@ class ExperimentRunner:
                             params.basis_epsilon = basis_epsilon
                             params.basis_clip_norm = basis_clip_norm
                             params.basis_data_fraction = basis_data_fraction
+                            params.basis_lr = basis_lr
+                            params.basis_epochs = basis_epochs
 
                             if method == "none":
                                 params.alpha = 0
@@ -324,9 +403,12 @@ class ExperimentRunner:
         folder = Path(self.results_folder) / self.exp_type / self.dataset
         folder.mkdir(parents=True, exist_ok=True)
         print(f"Saving results to {folder}")
-        # Sort and save results
+        # Sort and save results. The MPI server rank has no NICV column (it holds no data
+        # and skips evaluation), so only sort when the column is present.
         if self.results_df is not None:
-            self.results_df = self.results_df.sort_values("Normalized Intra-cluster Variance (NICV)")
+            nicv_col = "Normalized Intra-cluster Variance (NICV)"
+            if nicv_col in self.results_df.columns:
+                self.results_df = self.results_df.sort_values(nicv_col)
 
             # Determine filename based on protocol
             proto_name = self.protocol.__name__
@@ -356,6 +438,14 @@ def parse_args() -> Namespace:
     parser.add_argument("--exp_type", default="test", help="type of experiment")
     parser.add_argument("--datasets", nargs="+", default=accuracy_datasets, help="datasets to run")  # changed default from ["mnist"] to accuracy_datasets
     parser.add_argument("--plot", action="store_true", help="plot clusters")
+    parser.add_argument(
+        "--export_centroids",
+        action="store_true",
+        help="dump the final centroids of every run to "
+             "<results_folder>/<exp_type>/<dataset>/centroids/ (one .npy + .json "
+             "sidecar per run). Lets new point-to-centroid metrics (e.g. cosine "
+             "similarity) be recomputed offline without re-running the sweep."
+    )
     parser.add_argument("--num_runs", default=10, type=int, help="number of runs")
     parser.add_argument(
         "--eps_budgets",
@@ -411,21 +501,32 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--basis_epsilon",
-        default=0.5,
+        default=0.1,
         type=float,
-        help="privacy budget epsilon for the DP-SGD PCA basis step"
-    )
-    parser.add_argument(
-        "--basis_delta",
-        default=1e-5,
-        type=float,
-        help="privacy delta for the DP-SGD PCA basis step"
+        help="FRACTION of the total (eps, delta) budget spent on the DP-SGD PCA basis "
+             "(dpsgd_pca only); the remaining 1 - basis_epsilon goes to the aggregation"
     )
     parser.add_argument(
         "--basis_clip_norm",
         default=1.0,
         type=float,
         help="per-sample gradient clipping norm for DP-SGD PCA basis"
+    )
+    parser.add_argument(
+        "--basis_lr",
+        default=0.1,
+        type=float,
+        help="DP-SGD PCA learning rate (dpsgd_pca only; 0.01 was init-stuck, 0.1 converges)"
+    )
+    parser.add_argument(
+        "--basis_epochs",
+        default=10,
+        type=int,
+        help="DP-SGD PCA epochs (dpsgd_pca only). More epochs = more SGD steps = larger "
+             "calibrated sigma, so the noise-vs-optimization optimum is INTERIOR and small: "
+             "~10 at tight eps (mnist784, d=784) up to ~20 at looser eps; 40 over-noises and "
+             "roughly halves basis EVR at eps=0.5. glove100 (small d, flat spectrum) is "
+             "insensitive. Default 10."
     )
     parser.add_argument(
         "--basis_data_fraction",
@@ -457,7 +558,8 @@ def process_dataset(
         exp_type: str,
         results_folder: str,
         plot: bool,
-        with_comm: bool
+        with_comm: bool,
+        export_centroids: bool = False
 ) -> None:
     """Process a single dataset with given parameters."""
     # Determine number of clusters
@@ -468,13 +570,33 @@ def process_dataset(
     if not dataset_file.is_file():
         return
 
-    values = load_txt(str(dataset_file))
-    values = normalize(values, fixed)
+    # Skip the data load on the MPI server (rank 0): in the federated timing path the
+    # server only aggregates gathered messages and never uses its own shard, so it need
+    # not hold the full dataset. With every rank oversubscribed onto one host, 9 full
+    # copies at n=8 are what OOM large-d runs (glove300); dropping the server's copy is a
+    # cheap stopgap. The server still needs the (n, d) SHAPE for params.data_size / dim
+    # (=> delta and noise calibration), which txt_shape gets without allocating the array.
+    server_rank = False
+    if with_comm:
+        from data_io.comm import comm
+        server_rank = (comm.rank == comm.root)
+    if server_rank:
+        n, d = txt_shape(str(dataset_file))
+        values = np.broadcast_to(np.float64(0.0), (n, d))   # O(1) memory, correct shape
+    else:
+        values = load_txt(str(dataset_file))
+        # Files are written final (min-max + unit-norm) by scripts/download_data.py, so
+        # load them as-is. ensure_unit_norm is the idempotent safeguard guaranteeing the
+        # DP aggregation's L2 sensitivity-1 precondition: a no-op on prepared data, it
+        # still rescales any legacy/un-prepared file. This runs OUTSIDE the timed run().
+        values = ensure_unit_norm(values)
+        if fixed:
+            values = to_fixed(values)
 
     # Run experiments
     experiment = ExperimentRunner(
         proto, k, dataset, values, params_list,
-        exp_type, results_folder, plot, with_comm
+        exp_type, results_folder, plot, with_comm, export_centroids
     )
     try:
         experiment.run()
@@ -503,6 +625,8 @@ def _configure_lsh(params_list: Dict[str, Any], args: Namespace) -> None:
     params_list["basis_epsilons"] = [args.basis_epsilon]
     params_list["basis_clip_norms"] = [args.basis_clip_norm]
     params_list["basis_data_fractions"] = [args.basis_data_fraction]
+    params_list["basis_lr"] = args.basis_lr            # scalar (not swept)
+    params_list["basis_epochs"] = args.basis_epochs    # scalar (not swept)
 
 
 def main() -> None:
@@ -572,7 +696,8 @@ def main() -> None:
                 exp_type=exp_type,
                 results_folder=args.results_folder,
                 plot=args.plot,
-                with_comm=with_comm
+                with_comm=with_comm,
+                export_centroids=args.export_centroids
             )
             executor.map(partial_fn, params_list["datasets"])
     else:
@@ -585,7 +710,8 @@ def main() -> None:
                 exp_type,
                 args.results_folder,
                 args.plot,
-                with_comm
+                with_comm,
+                args.export_centroids
             )
 
 
