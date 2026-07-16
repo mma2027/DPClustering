@@ -23,7 +23,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from autodp import rdp_bank
+    from autodp.mechanism_zoo import NoisySGD_Mechanism
     AUTODP_AVAILABLE = True
 except ImportError:
     AUTODP_AVAILABLE = False
@@ -60,22 +60,14 @@ def _projected_variance(X, W_col):
 
 def _dp_cost_for_sigma(sigma, epsilon, delta, n, batch_size, epochs):
     """
-    Replicate the dp_cost computation from _find_sigma_autodp.
-    Returns the achieved epsilon for the given sigma.
+    Independent re-derivation of the achieved epsilon for a given sigma, using the
+    same accounting as _find_sigma_autodp: T-fold composition of the Poisson-
+    subsampled Gaussian (add/remove neighboring) via autodp's NoisySGD_Mechanism.
+    `epsilon` is unused (kept for signature compatibility with call sites).
     """
     T = epochs * max(1, n // batch_size)
     q = min(1.0, batch_size / n)
-    alphas = list(range(2, 256))
-    min_eps = float("inf")
-    for alpha in alphas:
-        try:
-            rdp = T * rdp_bank.RDP_gaussian_subsampled({"prob": q, "sigma": sigma}, alpha)
-        except Exception:
-            rdp = T * q * rdp_bank.RDP_gaussian({"sigma": sigma}, alpha)
-        eps = rdp + np.log(1.0 / delta) / (alpha - 1)
-        if eps < min_eps:
-            min_eps = eps
-    return min_eps
+    return NoisySGD_Mechanism(prob=q, sigma=sigma, niter=T).get_approxDP(delta)
 
 
 # ===========================================================================
@@ -447,22 +439,24 @@ class TestParamsNewAttributes(unittest.TestCase):
     def test_default_basis_epsilon(self):
         self.assertEqual(Params().basis_epsilon, 0.0)
 
-    def test_default_basis_delta(self):
-        self.assertEqual(Params().basis_delta, 1e-5)
-
     def test_default_basis_clip_norm(self):
         self.assertEqual(Params().basis_clip_norm, 1.0)
 
-    def test_set_all_four_via_kwargs(self):
+    def test_basis_delta_attribute_removed(self):
+        """basis_delta was a dead, misleading parameter (never used; the basis delta is
+        basis_epsilon * total delta) -- it must no longer exist on Params."""
+        self.assertFalse(hasattr(Params(), "basis_delta"))
+        with self.assertRaises(AttributeError):
+            Params(basis_delta=1e-6)
+
+    def test_set_all_via_kwargs(self):
         p = Params(
             basis_method="dpsgd_pca",
             basis_epsilon=0.5,
-            basis_delta=1e-6,
             basis_clip_norm=2.0,
         )
         self.assertEqual(p.basis_method, "dpsgd_pca")
         self.assertAlmostEqual(p.basis_epsilon, 0.5)
-        self.assertAlmostEqual(p.basis_delta, 1e-6)
         self.assertAlmostEqual(p.basis_clip_norm, 2.0)
 
     def test_setattr_post_init(self):
@@ -473,10 +467,10 @@ class TestParamsNewAttributes(unittest.TestCase):
         self.assertAlmostEqual(p.basis_epsilon, 0.3)
 
     def test_basis_attrs_appear_in_vars(self):
-        """All four new attributes must appear in vars(params) for CSV export."""
+        """The basis attributes must appear in vars(params) for CSV export."""
         p = Params()
         d = vars(p)
-        for attr in ("basis_method", "basis_epsilon", "basis_delta", "basis_clip_norm"):
+        for attr in ("basis_method", "basis_epsilon", "basis_clip_norm", "basis_data_fraction"):
             self.assertIn(attr, d, msg=f"{attr} missing from vars(Params())")
 
     def test_invalid_kwarg_still_raises_attribute_error(self):

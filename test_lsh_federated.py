@@ -13,11 +13,15 @@ Run:
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from configs.params import Params
 from parties import LshClient, LshServer
+from parties.lsh_client import poisson_subsample, basis_subsample_rate, BASIS_MAX_SUBSAMPLE
+import utils.ortho_clustering as oc
+from utils.ortho_clustering import random_orthogonal_basis
 from utils.protocols import lsh_proto
 
 
@@ -129,6 +133,75 @@ class TestFederatedBasisMethods(unittest.TestCase):
             self.skipTest("autodp not installed")
         self.assertEqual(fed.shape[0], n_leaves)
         self.assertFalse(np.any(np.isnan(fed)))
+
+
+class TestBasisMechanismParity(unittest.TestCase):
+    """Regression for #1: the centralized lsh_proto (accuracy path) must build the
+    dpsgd_pca basis with the SAME mechanism as the federated LshServer (timing path)
+    -- the same pooled Poisson sub-sample AND the same full-dataset amplified
+    accounting (full_n, data_fraction=1.0). Guards against reverting to the old
+    uniform-fraction, non-amplified path (data_fraction=0.1, full_n=None)."""
+
+    def _value_lists(self, ncl=4):
+        return split(make_data(), ncl)
+
+    def test_client_pool_equals_poisson_helper(self):
+        """Federated clients and the shared helper draw the identical pool."""
+        p = make_params(basis_method="dpsgd_pca", basis_epsilon=0.5)
+        vls = self._value_lists(4)
+        client_pool = np.vstack([LshClient(i, vls[i], p).subsample() for i in range(len(vls))])
+        helper_pool = np.vstack([poisson_subsample(vls[i], i, p) for i in range(len(vls))])
+        np.testing.assert_array_equal(client_pool, helper_pool)
+
+    def test_lsh_proto_feeds_federated_pool_with_amplified_accounting(self):
+        """lsh_proto must hand orthogonal_basis the SAME sub-sample the federated
+        clients pool, with full_n = data_size and data_fraction = 1.0. Stubbing
+        orthogonal_basis lets this run without autodp."""
+        p = make_params(basis_method="dpsgd_pca", basis_epsilon=0.5)
+        vls = self._value_lists(4)
+        expected_pool = np.vstack([poisson_subsample(vls[i], i, p) for i in range(len(vls))])
+
+        captured = {}
+
+        def stub(X, d_prime, **kwargs):
+            captured["X"] = np.asarray(X)
+            captured["kwargs"] = kwargs
+            return random_orthogonal_basis(X.shape[1], d_prime)
+
+        with mock.patch.object(oc, "orthogonal_basis", side_effect=stub):
+            lsh_proto(vls, p)
+
+        self.assertEqual(captured["kwargs"]["full_n"], p.data_size)   # amplification on
+        self.assertEqual(captured["kwargs"]["data_fraction"], 1.0)    # no inner re-subsample
+        self.assertEqual(captured["kwargs"]["method"], "dpsgd_pca")
+        np.testing.assert_array_equal(captured["X"], expected_pool)   # identical pool
+
+    def test_mechanism_params_independent_of_shard_count(self):
+        """The mechanism is defined by (rate gamma, full_n), both functions of public
+        params only -- not of how the data is sharded. So accuracy (few clients) and
+        timing (many clients) realize the SAME mechanism, differing only in the random
+        draw. gamma is also capped by BASIS_MAX_SUBSAMPLE."""
+        p2 = make_params(basis_method="dpsgd_pca", basis_epsilon=0.5, num_clients=2)
+        p8 = make_params(basis_method="dpsgd_pca", basis_epsilon=0.5, num_clients=8)
+        self.assertEqual(basis_subsample_rate(p2), basis_subsample_rate(p8))
+        self.assertEqual(p2.data_size, p8.data_size)            # full_n for amplification
+        self.assertLessEqual(basis_subsample_rate(p2) * p2.data_size, BASIS_MAX_SUBSAMPLE + 1)
+
+    def test_amplification_actually_reduces_noise(self):
+        """The accounting is meaningful: calibrating w.r.t. the full dataset
+        (amplified) needs strictly less noise than calibrating w.r.t. the m
+        sub-sampled points alone."""
+        try:
+            from utils.ortho_clustering import _find_sigma_autodp, _find_sigma_autodp_full
+        except ImportError:
+            self.skipTest("autodp helpers unavailable")
+        eps, delta, m, full_n, bs, ep = 0.5, 1e-5, 500, 50000, 256, 10
+        try:
+            amplified = _find_sigma_autodp_full(eps, delta, m, full_n, bs, ep)
+            plain = _find_sigma_autodp(eps, delta, m, bs, ep)
+        except ModuleNotFoundError:
+            self.skipTest("autodp not installed")
+        self.assertLess(amplified, plain)
 
 
 if __name__ == "__main__":
