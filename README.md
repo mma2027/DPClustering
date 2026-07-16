@@ -194,12 +194,41 @@ Key parameters include:
 - `--basis_method`: LSH SimHash basis, one or more of `random svd_pca dpsgd_pca` (default: `dpsgd_pca`)
 - `--tree_min_count`: noisy-count pruning threshold for `lsh`; branches below it are pruned (default: 0 = no pruning)
 - `--tree_max_depth`: max LSH tree depth (default: 0 = use `d_prime`)
-- `--basis_epsilon`: fraction in (0,1) of the total ε spent on the DP-SGD-PCA basis (default: 0.5; only `dpsgd_pca` spends basis budget)
+- `--basis_epsilon`: fraction in (0,1) of the total `(ε, δ)` budget spent on the DP-SGD-PCA basis (default: 0.1; only `dpsgd_pca` spends basis budget; the other `1 - basis_epsilon` goes to clustering)
 - `--basis_clip_norm`, `--basis_data_fraction`: DP-SGD-PCA gradient clip norm and data subsample fraction (defaults: 1.0, 0.1; see [data subsampling](#data-subsampling-for-dp-sgd))
 - `--num_runs`: random seeds per configuration (averaged; default 10)
 - `--results_folder`: Folder to store results
+- `--export_centroids`: dump the final centroids of every run to `<results_folder>/<exp_type>/<dataset>/centroids/` — one `.npy` (the `(n_clusters, dim)` centroid array) plus a matching `.json` sidecar recording the full parameter set (protocol, basis, `d'`, `eps`, `seed`, …), keyed by a short hash so stems are unique. Off by default. Centroids are otherwise computed in memory and discarded after evaluation, so adding a **new point-to-centroid metric** later (e.g. cosine similarity) would require re-running the whole sweep; with them saved, any such metric can be recomputed **offline** by reloading the dataset and calling `utils.evaluate` on the saved centroids — no clustering re-run needed. In an MPI (`timing`) run only the first client rank writes (the global centroids are identical across ranks). See [Recomputing metrics offline](#recomputing-metrics-offline).
 
 The privacy budget ε for `lsh` is **not** a CLI flag: it comes from the experiment's `eps_budgets` (`configs/defaults.py`, e.g. `0.5 1 2 4` for accuracy) and is split between leaf centroids and per-node counts by `sigma_fraction` (a `Params` default of 10).
+
+### Recomputing metrics offline
+
+The result CSVs store only **aggregated scalar metrics** (e.g. NICV, cosine similarity, and their confidence-interval half-widths `_h`) — not the centroids. So a *new* point-to-centroid metric normally can't be derived from past runs and would need the whole sweep re-run. Run with `--export_centroids` to avoid this: the final centroids of every run are saved, and any point-to-centroid metric can then be recomputed **without re-clustering**. Each run writes two same-stem files under `<results_folder>/<exp_type>/<dataset>/centroids/`:
+
+- `<stem>.npy` — the `(n_clusters, dim)` final centroid array.
+- `<stem>.json` — the full parameter set for that run (`protocol`, `basis_method`, `eps`, `seed`, `d_prime` for LSH, …), matching the columns of the corresponding `variances*.csv` row.
+
+To recompute a metric, reload the dataset **exactly as the pipeline does** (unit-norm + fixed-point round-trip), then call `utils.evaluate` (or a metric function directly) on each saved centroid array, grouping by config and averaging over seeds to reproduce the CSV aggregate:
+
+```python
+import glob, json, numpy as np
+from collections import defaultdict
+from data_io import load_txt, ensure_unit_norm, to_fixed, unscale
+from utils.evaluations import evaluate_mean_cosine_similarity, _assign_nearest
+
+values = unscale(to_fixed(ensure_unit_norm(load_txt("data/iris.txt"))))  # fixed=True path
+groups = defaultdict(list)
+for jf in glob.glob("results/accuracy/iris/centroids/*.json"):
+    meta = json.load(open(jf))
+    C = np.load(jf[:-5] + ".npy")
+    cos = evaluate_mean_cosine_similarity(_assign_nearest(values, C), C, values)
+    key = tuple(sorted((k, str(v)) for k, v in meta.items() if k != "seed"))  # config = params minus seed
+    groups[key].append(cos)
+per_config_mean = {k: float(np.mean(v)) for k, v in groups.items()}  # matches CSV "Mean Cosine Similarity"
+```
+
+(The `cosine_similarity` metric is already computed inline on every run, so this offline path is needed only for metrics added *after* a sweep was run.)
 
 ## LSH Prefix-Tree Clustering
 
@@ -385,7 +414,7 @@ python experiments.py --exp_type accuracy --protocol lsh \
     --basis_method random svd_pca dpsgd_pca \
     --d_primes 1 2 3 4 5 \
     --tree_min_count 30 \
-    --basis_epsilon 0.5 --basis_clip_norm 1.0 --basis_data_fraction 0.1 \
+    --basis_epsilon 0.1 --basis_clip_norm 1.0 --basis_data_fraction 0.1 \
     --datasets mnist --num_runs 10 --results_folder submission
 
 # 3a. Accuracy: LSH vs baselines (line charts over epsilon, one subplot per d')

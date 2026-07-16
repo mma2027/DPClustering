@@ -31,12 +31,28 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from data_io import normalize, ensure_unit_norm
+
 
 def save_dataset(name: str, data: np.ndarray, data_dir: Path):
-    """Save dataset as space-separated text file."""
+    """Normalize to final form and save as a space-separated text file.
+
+    All preprocessing lives here, in data preparation, so the experiment pipeline
+    can load the files as-is (and so the cost is OUTSIDE any timed/measured region):
+
+      1. per-feature min-max to ``[-1, 1]`` (puts heterogeneous feature scales on a
+         common range), then
+      2. ``ensure_unit_norm`` -- per-point L2 normalization onto the unit sphere.
+
+    Step 2 is the privacy safeguard: the DP aggregation calibrates its noise for
+    points of L2 norm <= 1, but min-max alone only bounds points to ``[-1, 1]^d``
+    (norm up to ``sqrt(d)``). Writing unit-norm data here guarantees the assumption
+    holds at aggregation time without any per-query normalization.
+    """
+    data = ensure_unit_norm(normalize(np.asarray(data, dtype=float), fixed=False))
     path = data_dir / f"{name}.txt"
     np.savetxt(path, data, fmt="%.6f", delimiter=" ")
-    print(f"  {name}.txt: {data.shape[0]} samples, {data.shape[1]} features")
+    print(f"  {name}.txt: {data.shape[0]} samples, {data.shape[1]} features (unit-norm)")
 
 
 def prepare_sklearn_datasets(data_dir: Path):
@@ -221,6 +237,118 @@ def prepare_glove100(data_dir: Path):
     save_dataset("glove100", data, data_dir)
 
 
+def prepare_glove300(data_dir: Path):
+    """GloVe-6B 300d word embeddings: ~400,000 vectors x 300 (Stanford NLP).
+
+    Same corpus/vocabulary as `glove100` (GloVe-6B) but the 300-dim variant -- 3x the
+    dimensionality at the same 400k points (n*d ~ 1.2e8). A higher-d member of the LARGE
+    tier that stays well within limits. Saved as `glove300`. Comes from the same
+    glove.6B.zip as glove100 (just a different member file).
+
+    Source resolution (in order):
+      1. GLOVE300_TXT — path to a pre-downloaded glove.6B.300d.txt (no network)
+      2. GLOVE_URL    — zip to download (default: Stanford glove.6B.zip, ~822 MB; shared
+                        with glove100)
+    Set GLOVE300_MAX_ROWS to cap the number of vectors (default: all).
+    """
+    import io
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    max_rows = int(os.environ.get("GLOVE300_MAX_ROWS", "0")) or None
+    glove_txt = os.environ.get("GLOVE300_TXT")
+
+    def parse(fobj):
+        vecs = []
+        for i, line in enumerate(fobj):
+            if max_rows and i >= max_rows:
+                break
+            parts = line.rstrip().split(" ")
+            vecs.append([float(x) for x in parts[1:]])   # 6B tokens are single (no spaces)
+        return np.asarray(vecs, dtype=np.float32)
+
+    if glove_txt and os.path.exists(glove_txt):
+        print(f"  Parsing local GloVe file: {glove_txt}")
+        with open(glove_txt, "r", encoding="utf-8") as f:
+            data = parse(f)
+    else:
+        url = os.environ.get("GLOVE_URL", "https://nlp.stanford.edu/data/glove.6B.zip")
+        print(f"  Downloading GloVe from {url} (~822 MB)...")
+        with tempfile.TemporaryDirectory() as td:
+            zpath = os.path.join(td, "glove.6B.zip")
+            urllib.request.urlretrieve(url, zpath)
+            with zipfile.ZipFile(zpath) as z, z.open("glove.6B.300d.txt") as f:
+                data = parse(io.TextIOWrapper(f, encoding="utf-8"))
+    save_dataset("glove300", data, data_dir)
+
+
+def prepare_glove840b(data_dir: Path):
+    """GloVe-840B 300d word embeddings: ~2,196,017 vectors x 300 (Stanford NLP).
+
+    The large sibling of `glove100` (GloVe-6B-100d): ~5.5x the vectors and 3x the
+    dimensionality (n*d ~ 6.6e8), chosen to push the FastLloyd baseline close to
+    its practical limit while the LSH method stays cheap. Saved as `glove840b`.
+
+    Source resolution (in order):
+      1. GLOVE840B_TXT — path to a pre-downloaded glove.840B.300d.txt (no network)
+      2. GLOVE840B_URL — zip to download (default: Stanford glove.840B.300d.zip, ~2.0 GB)
+    Set GLOVE840B_MAX_ROWS to cap the number of vectors (default: all).
+
+    Parsing note: unlike the 6B files, some 840B tokens contain spaces, so the word
+    is NOT always a single leading field. We take the vector as the LAST 300
+    whitespace-separated fields (word = everything before) and skip any malformed
+    line. Rows are kept as small float32 arrays (not Python lists) so 2.2M x 300
+    parses in ~2.6 GB rather than exploding on boxed-float overhead.
+    """
+    import io
+    import os
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    DIM = 300
+    max_rows = int(os.environ.get("GLOVE840B_MAX_ROWS", "0")) or None
+    glove_txt = os.environ.get("GLOVE840B_TXT")
+
+    def parse(fobj):
+        rows = []
+        kept = skipped = 0
+        for line in fobj:
+            if max_rows and kept >= max_rows:
+                break
+            parts = line.rstrip().split(" ")
+            if len(parts) < DIM + 1:
+                skipped += 1
+                continue
+            try:
+                vec = np.asarray(parts[-DIM:], dtype=np.float32)   # last 300 = vector
+            except ValueError:
+                skipped += 1
+                continue
+            rows.append(vec)
+            kept += 1
+        if skipped:
+            print(f"  ({skipped} malformed lines skipped)")
+        return np.vstack(rows) if rows else np.empty((0, DIM), dtype=np.float32)
+
+    if glove_txt and os.path.exists(glove_txt):
+        print(f"  Parsing local GloVe file: {glove_txt}")
+        with open(glove_txt, "r", encoding="utf-8") as f:
+            data = parse(f)
+    else:
+        url = os.environ.get("GLOVE840B_URL",
+                             "https://nlp.stanford.edu/data/glove.840B.300d.zip")
+        print(f"  Downloading GloVe-840B from {url} (~2.0 GB)...")
+        with tempfile.TemporaryDirectory() as td:
+            zpath = os.path.join(td, "glove.840B.300d.zip")
+            urllib.request.urlretrieve(url, zpath)
+            with zipfile.ZipFile(zpath) as z, z.open("glove.840B.300d.txt") as f:
+                data = parse(io.TextIOWrapper(f, encoding="utf-8"))
+    print(f"  Parsed {data.shape[0]} vectors x {data.shape[1]}")
+    save_dataset("glove840b", data, data_dir)
+
+
 def prepare_timing_datasets(data_dir: Path):
     """Generate synthetic datasets used by timing experiments."""
     from sklearn.datasets import make_blobs
@@ -236,16 +364,29 @@ def prepare_timing_datasets(data_dir: Path):
                 save_dataset(name, data, data_dir)
 
 
-LARGE_BUILDERS = {"mnist784": prepare_mnist784, "glove100": prepare_glove100}
+# LARGE tier: the default high-d datasets (fit comfortably; FastLloyd baseline feasible).
+LARGE_BUILDERS = {
+    "mnist784": prepare_mnist784,
+    "glove100": prepare_glove100,
+    "glove300": prepare_glove300,
+}
+# HUGE tier: near the FastLloyd practical limit; opt-in, heavy download/compute.
+HUGE_BUILDERS = {
+    "glove840b": prepare_glove840b,   # ~2.2M x 300, ~2 GB download
+}
+# Combined registry for --only (build any single dataset by name).
+OPT_IN_BUILDERS = {**LARGE_BUILDERS, **HUGE_BUILDERS}
 
 
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="Prepare FastLloyd / LSH datasets")
     ap.add_argument("--large", action="store_true",
-                    help="also prepare the large high-d datasets (mnist784, glove100)")
+                    help="also prepare the large high-d datasets (mnist784, glove100, glove300)")
+    ap.add_argument("--huge", action="store_true",
+                    help="also prepare the HUGE tier near FastLloyd's limit (glove840b, ~2 GB dl)")
     ap.add_argument("--only", nargs="+", default=None, metavar="NAME",
-                    help="prepare ONLY these datasets, e.g. --only mnist784 glove100")
+                    help="prepare ONLY these datasets, e.g. --only mnist784 glove100 glove300 glove840b")
     args = ap.parse_args()
 
     data_dir = project_root / "data"
@@ -255,12 +396,12 @@ def main():
     print("FastLloyd Dataset Preparation")
     print("=" * 60)
 
-    # --only: build just the requested datasets (currently the large ones) and stop.
+    # --only: build just the requested datasets (large or huge tier) and stop.
     if args.only:
         for name in args.only:
-            if name in LARGE_BUILDERS:
+            if name in OPT_IN_BUILDERS:
                 print(f"\nPreparing {name}...")
-                LARGE_BUILDERS[name](data_dir)
+                OPT_IN_BUILDERS[name](data_dir)
             else:
                 print(f"  (skipping unknown --only target: {name})")
         print("\nDone:", data_dir)
@@ -279,9 +420,14 @@ def main():
     prepare_timing_datasets(data_dir)
 
     if args.large:
-        print("\n[5/5] Preparing large high-d datasets (mnist784, glove100)...")
-        prepare_mnist784(data_dir)
-        prepare_glove100(data_dir)
+        print("\n[5/5] Preparing large high-d datasets (mnist784, glove100, glove300)...")
+        for build in LARGE_BUILDERS.values():
+            build(data_dir)
+
+    if args.huge:
+        print("\n[huge] Preparing the HUGE tier near FastLloyd's limit (glove840b)...")
+        for build in HUGE_BUILDERS.values():
+            build(data_dir)
 
     print("\n" + "=" * 60)
     print("Done! All datasets saved to:", data_dir)

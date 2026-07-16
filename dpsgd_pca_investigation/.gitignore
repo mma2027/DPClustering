@@ -1,0 +1,7 @@
+# Cached normalized datasets (large .npy, regenerated on first run)
+cache/
+# transient run logs
+results/_run_*.log
+# python bytecode
+__pycache__/
+*.pyc
