@@ -12,6 +12,7 @@ needs to be processed and shared among multiple clients, with particular
 support for fixed-point arithmetic operations.
 """
 
-__all__ = ['load_txt', 'shuffle_and_split', 'normalize', 'to_fixed', 'to_int', 'unscale', 'MOD', 'SCALE']
+__all__ = ['load_txt', 'txt_shape', 'shuffle_and_split', 'normalize', 'ensure_unit_norm',
+           'to_fixed', 'to_int', 'unscale', 'MOD', 'SCALE']
 from data_io.fixed import to_fixed, to_int, unscale, MOD, SCALE
-from data_io.data_handler import load_txt, shuffle_and_split, normalize
+from data_io.data_handler import load_txt, txt_shape, shuffle_and_split, normalize, ensure_unit_norm
