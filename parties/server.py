@@ -110,6 +110,11 @@ class Server:
             d = params.dim
             rho = params.rho
 
+            # NOTE (baseline fairness): FastLloyd assumes the box domain [-1,1]^d, so the
+            # sum query's L2 sensitivity is sqrt(d) (or 2*sqrt(d) constrained) -- evaluated
+            # AS PUBLISHED. On unit-norm data the true contribution norm is <= 1, so this
+            # over-noises by ~sqrt(d); that d-dependence is the gap the LSH/cosine method
+            # exploits. See large/EXPERIMENT_PLAN.md ("Threat model, baseline fairness").
             if params.method != "none":
                 # min to ensure that the sensitivity is bounded by domain diagonal
                 sum_sensitivity = min(2 * np.sqrt(d), params.max_dist)
