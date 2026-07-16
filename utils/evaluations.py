@@ -9,6 +9,7 @@ It implements various metrics to assess clustering quality, including:
 - Davies-Bouldin Index
 - Calinski-Harabasz Index
 - Dunn Index
+- Mean Cosine Similarity (average cosine similarity of each point to its centroid)
 """
 
 import numpy as np
@@ -57,6 +58,8 @@ def evaluate(centroids, values, gt_centroids, metrics="nicv"):
         - "calinski_harabasz": Calinski-Harabasz Index
         - "dunn_index": Dunn Index
         - "mse": Mean Squared Error
+        - "cosine_similarity": Mean cosine similarity of each point to its
+          assigned centroid (averaged over all points)
         - "all": Compute all metrics
 
     Returns
@@ -99,6 +102,12 @@ def evaluate(centroids, values, gt_centroids, metrics="nicv"):
         "mse": {
             "name": "Mean Squared Error",
             "func": lambda: evaluate_MSE(centroids, gt_centroids),
+            "default": 0,
+            "requires_multi_cluster": False
+        },
+        "cosine_similarity": {
+            "name": "Mean Cosine Similarity",
+            "func": lambda: evaluate_mean_cosine_similarity(associations, centroids, values),
             "default": 0,
             "requires_multi_cluster": False
         },
@@ -219,6 +228,60 @@ def evaluate_WCSS(associations, centroids, values):
     """
     return sum([np.sum((values[associations == cluster] - centroids[cluster]) ** 2) for cluster in
                 range(centroids.shape[0]) if np.sum(associations == cluster) > 0])
+
+
+def evaluate_mean_cosine_similarity(associations, centroids, values, mem_budget=256_000_000):
+    """
+    Calculates the mean cosine similarity of each point to its assigned centroid.
+
+    For every data point, computes the cosine similarity between the point and
+    the centroid of the cluster it was assigned to, then averages over all
+    points. Values lie in [-1, 1]; higher values indicate points that are more
+    tightly aligned (in angle) with their cluster centroid, i.e. a better
+    clustering under cosine geometry.
+
+    A point (or centroid) with zero norm has no defined direction; its cosine
+    similarity is treated as 0 (neither aligned nor opposed).
+
+    Computed in row-chunks so the full (n_samples, n_features) gathered-centroid
+    matrix is never materialized (matches the memory bound used elsewhere in
+    this module for large datasets, e.g. glove100 with ~400k points).
+
+    Parameters
+    ----------
+    associations : numpy.ndarray
+        Array of cluster assignments for each point, shape (n_samples,)
+    centroids : numpy.ndarray
+        Array of cluster centroids, shape (n_clusters, n_features)
+    values : numpy.ndarray
+        Array of data points, shape (n_samples, n_features)
+    mem_budget : int, optional
+        Approximate peak-memory budget in bytes for the chunked computation.
+
+    Returns
+    -------
+    float
+        Mean cosine similarity over all points, in [-1, 1]. Returns 0.0 when
+        there are no points.
+    """
+    values = np.asarray(values, dtype=float)
+    centroids = np.asarray(centroids, dtype=float)
+    n, d = values.shape
+    if n == 0:
+        return 0.0
+
+    c_norms = np.linalg.norm(centroids, axis=1)                  # ||c||, (n_clusters,)
+    chunk = max(1, int(mem_budget // (8 * max(d, 1))))
+    total = 0.0
+    for s in range(0, n, chunk):
+        v = values[s:s + chunk]
+        assigned = centroids[associations[s:s + chunk]]          # (chunk, d)
+        dots = np.einsum("ij,ij->i", v, assigned)                # v . c
+        denom = np.linalg.norm(v, axis=1) * c_norms[associations[s:s + chunk]]
+        # Zero-norm point or centroid -> undefined direction -> similarity 0.
+        cos = np.divide(dots, denom, out=np.zeros_like(dots), where=denom > 0)
+        total += cos.sum()
+    return total / n
 
 
 def evaluate_BCSS(associations, centroids, values):
