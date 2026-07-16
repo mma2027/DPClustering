@@ -77,6 +77,14 @@ COLORS = {
 }
 
 
+# Human-readable legend overrides. LSH-SVD uses a NON-PRIVATE oracle basis (exact
+# data PCA, no DP budget for the basis); flag it so the curve is never read as a
+# DP guarantee at the plotted ε. Internal keys stay unchanged (ordering/colors/CSV).
+LEGEND_DISPLAY = {
+    "LSH-SVD": "LSH-SVD (non-private oracle)",
+}
+
+
 def _label_color(label):
     """Return line color based on method label prefix."""
     for prefix, color in COLORS.items():
@@ -263,6 +271,7 @@ def plot_dataset_metric(rows, metric, dataset, d_primes, epss, out_folder):
             if l not in labels:
                 labels.append(l)
                 handles.append(h)
+    labels = [LEGEND_DISPLAY.get(l, l) for l in labels]   # flag non-private oracle
     if handles:
         axes[0, 0].legend(handles, labels, fontsize=8, title="Method",
                           loc="upper left", bbox_to_anchor=(1.02, 1.0),

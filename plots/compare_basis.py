@@ -41,9 +41,11 @@ METRICS_DICT = {
     "Mean Squared Error": "MSE",
 }
 
+# svd_pca is the NON-PRIVATE oracle (exact data PCA, no DP budget for the basis) --
+# labelled so its bar is never read as a DP guarantee at the plotted ε.
 BASIS_DISPLAY = {
     "random":    "Random",
-    "svd_pca":   "SVD PCA",
+    "svd_pca":   "SVD PCA (non-private oracle)",
     "dpsgd_pca": "DP-SGD PCA",
 }
 
