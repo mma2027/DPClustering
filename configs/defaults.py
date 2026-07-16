@@ -34,7 +34,12 @@ accuracy_datasets = ["iris", "s1", "house", "adult", "lsun", "birch2", "wine", "
 # Large, dense, high-dimensional datasets (opt-in via download_data.py --large).
 # Accuracy on these is evaluated with NICV only — the other metrics (especially
 # the O(n^2) silhouette / Dunn) are infeasible at this scale.
-large_datasets = ["mnist784", "glove100"]
+large_datasets = ["mnist784", "glove100", "glove300"]
+
+# HUGE tier: near the FastLloyd practical limit (~2.2M x 300). Kept separate from
+# large_datasets so the standard large run stays feasible; opt in explicitly (e.g.
+# `ACC_DATASETS="glove840b" bash large/run_distributed.sh`).
+huge_datasets = ["glove840b"]
 
 # Datasets for timing experiments
 timing_datasets = [
@@ -107,6 +112,12 @@ num_clusters = {
     # grow linearly in k; LSH's are k-independent, so this is where LSH should win.
     "mnist784": 500,    # full MNIST, 70k x 784   (LSH leaves up to ~662)
     "glove100": 4000,   # GloVe-6B-100d, ~400k x 100 (LSH leaves up to ~4616)
+    "glove300": 4000,   # GloVe-6B-300d, ~400k x 300 (same 400k vocab as glove100 -> same
+                        # leaf scale; 3x the dims is the only change)
+    # HUGE tier. GloVe-840B-300d, ~2.2M x 300 -- the near-FastLloyd-limit dataset. k is
+    # provisional: ~2x glove100 pending a first LSH run's realized leaf count (leaves grow
+    # sub-linearly in n, capped by 2^d'; retune like the others once measured).
+    "glove840b": 8000,  # GloVe-840B-300d, ~2.2M x 300
 }
 
 num_clusters.update({

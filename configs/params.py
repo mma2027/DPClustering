@@ -57,10 +57,8 @@ class Params:
     d_prime: int = 3
     sigma: float = 0.0 #TODO: To remove later
     sigma_fraction: float = 10.0
-    basis_method: str = "dpsgd_pca"
-    basis_epsilon: float = 0.2 #Fraction of privacy for private basis
-    basis_clip_norm: float = 1.0
-    basis_data_fraction: float = 0.1
+    # Private-basis (LSH) parameters are set as INSTANCE attributes in __init__
+    # (see below) so they always appear in vars(self) for CSV export.
     # LSH prefix-tree protocol (lsh_proto)
     tree_max_depth: int = 0            # 0 -> use d_prime as the max tree depth
     min_count_in_node: float = 0.0     # prune a child branch below this noisy count
@@ -80,6 +78,18 @@ class Params:
         Raises:
             AttributeError: If an invalid parameter name is provided
         """
+        # Private-basis (LSH) parameters. Set as instance attributes (before the
+        # kwargs loop, so kwargs still override them) so they always appear in
+        # vars(self) for CSV export. Defaults mean "no private basis": a random
+        # basis with zero basis budget; the experiment sweep / CLI override them.
+        self.basis_method = "random"
+        self.basis_epsilon = 0.0      # fraction of the TOTAL (eps, delta) spent on the basis
+        self.basis_clip_norm = 1.0    # per-sample gradient clip for DP-SGD PCA
+        self.basis_data_fraction = 0.1
+        self.basis_lr = 0.1           # DP-SGD PCA learning rate (0.01 was init-stuck)
+        self.basis_epochs = 10        # DP-SGD PCA epochs; sigma is calibrated to the step
+                                      # count, so the noise-vs-optimization optimum is small
+                                      # (~10 at tight eps/high d; 40 over-noises, halves EVR)
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
